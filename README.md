@@ -1,6 +1,6 @@
-{{PROJECT_NAME}}
+Aiven PostgreSQL Security
 ======================
-This is a template repository for creating open source repositories at Aiven.
+Adds utility functions to harden PostgreSQL through shared libraries and hooks.
 
 Overview
 ========
@@ -11,9 +11,20 @@ Features
 Setup
 ============
 
+Build and install the add on
+```
+$ make
+$ cp aiven_gatekeeper.so $postgres_lib/
+
+# edit postgresql.conf
+shared_preload_libraries = 'aiven_gatekeeper'
+
+# restart postgresql
+```
+
 License
 ============
-{{PROJECT_NAME}} is licensed under the Apache license, version 2.0. Full license text is available in the [LICENSE](LICENSE) file.
+Aiven PostgreSQL Security is licensed under the Apache license, version 2.0. Full license text is available in the [LICENSE](LICENSE) file.
 
 Please note that the project explicitly does not require a CLA (Contributor License Agreement) from its contributors.
 
