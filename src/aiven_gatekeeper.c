@@ -15,6 +15,7 @@
 #include "commands/explain.h"
 #include "miscadmin.h"
 #include "tcop/utility.h"
+#include "tcop/cmdtag.h"
 #include "utils/guc.h"
 
 PG_MODULE_MAGIC;
@@ -38,7 +39,7 @@ static void gatekeeper_checks(PlannedStmt *pstmt,
                               QueryCompletion *qc);
 
 /* returns true if the session and current user ids are different */
-static bool is_elevated()
+static bool is_elevated(void)
 {
     /* if current user != session user we are probably elevated
      * this is a bit of a dumb check, ideally it would check if
