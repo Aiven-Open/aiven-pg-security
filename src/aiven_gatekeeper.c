@@ -46,6 +46,17 @@ static bool
     return CurrentUserId != SessionUserId;
 }
 
+static bool
+    is_security_restricted(void)
+{
+    /* checks if we are in a security_restricted context
+     * this occurs during VACUUM, ANALYZE, MATERIAL VIEW etc
+     * and has been a source of privilege escalation vulnerabilities
+     * like CVE-2020-25695 and CVE-2022-1552
+     */
+    return InSecurityRestrictedOperation();
+}
+
 
 static void
     gatekeeper_checks(PROCESS_UTILITY_PARAMS)
@@ -70,9 +81,12 @@ static void
     case T_DropRoleStmt:     // DROP ROLE
     case T_GrantRoleStmt:    // GRANT ROLE
         // TODO: check if trying to grant superuser?
-        if (is_elevated())
+        if (is_elevated() || is_security_restricted())
         {
-            elog(ERROR, "Denied - ROLE modifiers are disabled");
+            if (is_security_restricted())
+                elog(ERROR, "Denied - ROLE modifiers are disabled in SECURITY_RESTRICTED_OPERATION");
+            else
+                elog(ERROR, "Denied - ROLE modifiers are disabled");
             return;
         }
         break;
@@ -92,9 +106,12 @@ static void
         /* otherwise, we don't want copy TO/FROM FILE
          * in an elevated context
          */
-        if (copyStmt->filename && is_elevated())
+        if (copyStmt->filename && (is_elevated() || is_security_restricted()))
         {
-            elog(ERROR, "Denied - COPY TO/FROM FILE is disabled");
+            if (is_security_restricted())
+                elog(ERROR, "Denied - COPY TO/FROM FILE is disabled in SECURITY_RESTRICTED_OPERATION");
+            else
+                elog(ERROR, "Denied - COPY TO/FROM FILE is disabled");
             return;
         }
         break;

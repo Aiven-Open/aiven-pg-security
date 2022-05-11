@@ -47,4 +47,5 @@
 
 
 static bool is_elevated(void);
+static bool is_security_restricted(void);
 static void gatekeeper_checks(PROCESS_UTILITY_PARAMS);
