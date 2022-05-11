@@ -15,8 +15,9 @@
 #include "commands/explain.h"
 #include "miscadmin.h"
 #include "tcop/utility.h"
-#include "tcop/cmdtag.h"
 #include "utils/guc.h"
+
+#include "aiven_gatekeeper.h"
 
 PG_MODULE_MAGIC;
 
@@ -28,18 +29,10 @@ void _PG_fini(void);
 /* Saved hook values in case of unload */
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 
-static bool is_elevated(void);
-static void gatekeeper_checks(PlannedStmt *pstmt,
-                              const char *queryString,
-                              bool readOnlyTree,
-                              ProcessUtilityContext context,
-                              ParamListInfo params,
-                              QueryEnvironment *queryEnv,
-                              DestReceiver *dest,
-                              QueryCompletion *qc);
 
 /* returns true if the session and current user ids are different */
-static bool is_elevated(void)
+static bool 
+    is_elevated(void)
 {
     /* if current user != session user we are probably elevated
      * this is a bit of a dumb check, ideally it would check if
@@ -53,19 +46,11 @@ static bool is_elevated(void)
     return CurrentUserId != SessionUserId;
 }
 
-/*
- * Check if this might lead to privilege escalation
- */
+
 static void
-gatekeeper_checks(PlannedStmt *pstmt,
-                  const char *queryString,
-                  bool readOnlyTree,
-                  ProcessUtilityContext context,
-                  ParamListInfo params,
-                  QueryEnvironment *queryEnv,
-                  DestReceiver *dest,
-                  QueryCompletion *qc)
+    gatekeeper_checks(PROCESS_UTILITY_PARAMS)
 {
+
 
     /* get the utilty statment from the planner
      * https://github.com/postgres/postgres/blob/24d2b2680a8d0e01b30ce8a41c4eb3b47aca5031/src/backend/tcop/utility.c#L575
@@ -132,13 +117,9 @@ gatekeeper_checks(PlannedStmt *pstmt,
 
     /* execute the actual query */
     if (prev_ProcessUtility)
-        prev_ProcessUtility(pstmt, queryString, readOnlyTree,
-                            context, params, queryEnv,
-                            dest, qc);
+        prev_ProcessUtility(PROCESS_UTILITY_ARGS);
     else
-        standard_ProcessUtility(pstmt, queryString, readOnlyTree,
-                                context, params, queryEnv,
-                                dest, qc);
+        standard_ProcessUtility(PROCESS_UTILITY_ARGS);
 }
 
 /*
