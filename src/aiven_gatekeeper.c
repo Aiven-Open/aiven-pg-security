@@ -12,7 +12,7 @@
 #include "postgres.h"
 
 #include "access/xact.h"
-#include "commands/explain.h"
+#include "commands/extension.h"
 #include "miscadmin.h"
 #include "tcop/utility.h"
 #include "utils/guc.h"
@@ -29,25 +29,36 @@ void _PG_fini(void);
 /* Saved hook values in case of unload */
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 
-
 /* returns true if the session and current user ids are different */
-static bool 
-    is_elevated(void)
+static bool
+is_elevated(void)
 {
-    /* if current user != session user we are probably elevated
-     * this is a bit of a dumb check, ideally it would check if
-     * session user is super user. SessionUserIsSuperuser is available
-     * but no getter exists for this.
+    /* if current user != session and the current user is
+     * a superuser, but the original session_user is not,
+     * we can say that we are in an elevated context.
      */
 
-    Oid CurrentUserId = GetUserId();
-    Oid SessionUserId = GetSessionUserId();
- 
-    return CurrentUserId != SessionUserId;
+    Oid currentUserId = GetUserId();
+    Oid sessionUserId = GetSessionUserId();
+
+    bool is_superuser;
+
+    /* short circuit if the current and session user are the same
+     * saves on a slightly more expensive role fetch
+     */
+    if (currentUserId == sessionUserId)
+    {
+        return false;
+    }
+
+    is_superuser = superuser_arg(currentUserId);
+
+    /* elevated to supersuser when the session auth user does not have superuser privileges */
+    return is_superuser && !session_auth_is_superuser;
 }
 
 static bool
-    is_security_restricted(void)
+is_security_restricted(void)
 {
     /* checks if we are in a security_restricted context
      * this occurs during VACUUM, ANALYZE, MATERIAL VIEW etc
@@ -57,11 +68,9 @@ static bool
     return InSecurityRestrictedOperation();
 }
 
-
 static void
-    gatekeeper_checks(PROCESS_UTILITY_PARAMS)
+gatekeeper_checks(PROCESS_UTILITY_PARAMS)
 {
-
 
     /* get the utilty statment from the planner
      * https://github.com/postgres/postgres/blob/24d2b2680a8d0e01b30ce8a41c4eb3b47aca5031/src/backend/tcop/utility.c#L575
@@ -69,26 +78,32 @@ static void
     Node *stmt = pstmt->utilityStmt;
     /* Parse copy statement */
     CopyStmt *copyStmt;
-    /* Parse variable set statement */
-    VariableSetStmt *varSetStmt;
 
     /* switch between the types to see if we care about this stmt */
     switch (stmt->type)
     {
-    case T_AlterRoleStmt:    // ALTER ROLE
-    case T_AlterRoleSetStmt: 
-    case T_CreateRoleStmt:   // CREATE ROLE
-    case T_DropRoleStmt:     // DROP ROLE
-    case T_GrantRoleStmt:    // GRANT ROLE
-        // TODO: check if trying to grant superuser?
-        if (is_elevated() || is_security_restricted())
+    case T_AlterRoleStmt: // ALTER ROLE
+    case T_AlterRoleSetStmt:
+    case T_CreateRoleStmt: // CREATE ROLE
+    case T_DropRoleStmt:   // DROP ROLE
+    case T_GrantRoleStmt:  // GRANT ROLE
+
+        if (creating_extension)
         {
-            if (is_security_restricted())
-                elog(ERROR, "Denied - ROLE modifiers are disabled in SECURITY_RESTRICTED_OPERATION");
-            else
-                elog(ERROR, "Denied - ROLE modifiers are disabled");
+            elog(ERROR, "ROLE modifiers not allowed in extensions");
             return;
         }
+        if (is_security_restricted())
+        {
+            elog(ERROR, "ROLE modifiers not allowed in SECURITY_RESTRICTED_OPERATION");
+            return;
+        }
+        if (is_elevated())
+        {
+            elog(ERROR, "ROLE modifiers not allowed");
+            return;
+        }
+
         break;
     case T_CopyStmt: // COPY
 
@@ -100,34 +115,38 @@ static void
          */
         if (copyStmt->is_program)
         {
-            elog(ERROR, "Denied - COPY TO/FROM PROGRAM is disabled");
+            elog(ERROR, "COPY TO/FROM PROGRAM not allowed");
             return;
         }
         /* otherwise, we don't want copy TO/FROM FILE
          * in an elevated context
          */
-        if (copyStmt->filename && (is_elevated() || is_security_restricted()))
+        if (copyStmt->filename)
         {
+            if (creating_extension)
+            {
+                elog(ERROR, "COPY TO/FROM FILE not allowed in extensions");
+                return;
+            }
             if (is_security_restricted())
-                elog(ERROR, "Denied - COPY TO/FROM FILE is disabled in SECURITY_RESTRICTED_OPERATION");
-            else
-                elog(ERROR, "Denied - COPY TO/FROM FILE is disabled");
-            return;
+            {
+                elog(ERROR, "COPY TO/FROM FILE not allowed in SECURITY_RESTRICTED_OPERATION");
+                return;
+            }
+            if (is_elevated())
+            {
+                elog(ERROR, "COPY TO/FROM FILE not allowed");
+                return;
+            }
         }
         break;
     case T_VariableSetStmt:
-        /* SET SESSION_AUTHORIZATION would allow bypassing of our dumb priv-esc check.
+        /* SET SESSION_AUTHORIZATION would allow bypassing of our dumb privilege escalation check.
          * even though this should be blocked in extension installation, due to
          *  ERROR:  cannot set parameter "session_authorization" within security-definer function
-         * Disable it here anyway.
+         * so don't do anything.
          */
-        varSetStmt = (VariableSetStmt *)stmt;
-
-        if(strcmp(varSetStmt->name,"session_authorization") == 0 && is_elevated())
-        {
-            elog(ERROR, "Denied - SET SESSION_AUTHORIZATION");
-            return;
-        }
+        break;
     default:
         break;
     }
