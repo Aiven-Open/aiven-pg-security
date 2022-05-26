@@ -67,8 +67,6 @@ is_security_restricted(void)
 {
     /* checks if we are in a security_restricted context
      * this occurs during VACUUM, ANALYZE, MATERIAL VIEW etc
-     * and has been a source of privilege escalation vulnerabilities
-     * like CVE-2020-25695 and CVE-2022-1552
      */
     return InSecurityRestrictedOperation();
 }
