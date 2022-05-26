@@ -78,15 +78,15 @@ allow_role_stmt(void)
 {
     if (creating_extension)
         elog(ERROR, "ROLE modification to SUPERUSER not allowed in extensions");
-    
+
     if (is_security_restricted())
         elog(ERROR, "ROLE modification to SUPERUSER not allowed in SECURITY_RESTRICTED_OPERATION");
-    
+
     if (is_elevated())
         elog(ERROR, "ROLE modification to SUPERUSER not allowed");
 }
 
-static void 
+static void
 allow_granted_roles(List *addroleto)
 {
     ListCell *role_cell;
@@ -94,12 +94,11 @@ allow_granted_roles(List *addroleto)
     Oid role_member_oid;
 
     // check if any of the roles we are trying to add to have superuser
-    foreach(role_cell, addroleto)
+    foreach (role_cell, addroleto)
     {
         rolemember = lfirst(role_cell);
-        elog(INFO,"%s",rolemember->rolename);
         role_member_oid = get_rolespec_oid(rolemember, false);
-        if(superuser_arg(role_member_oid))
+        if (superuser_arg(role_member_oid))
             allow_role_stmt();
     }
 }
@@ -107,7 +106,7 @@ static void
 allow_grant_role(Oid role_oid)
 {
     // check if any of the roles we are trying to add to have superuser
-    if(superuser_arg(role_oid))
+    if (superuser_arg(role_oid))
         allow_role_stmt();
 }
 
@@ -124,7 +123,7 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
     AlterRoleStmt *alterRoleStmt;
     GrantRoleStmt *grantRoleStmt;
     ListCell *option;
-    DefElem  *defel;
+    DefElem *defel;
     List *addroleto;
     ListCell *grantRoleCell;
     AccessPriv *priv;
@@ -137,47 +136,48 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
     case T_AlterRoleSetStmt:
         alterRoleStmt = (AlterRoleStmt *)stmt;
         // check if we are altering with superuser
- 
-        foreach(option, alterRoleStmt->options)
-		{	
-            defel = (DefElem *) lfirst(option);
+
+        foreach (option, alterRoleStmt->options)
+        {
+            defel = (DefElem *)lfirst(option);
             // superuser or nosuperuser is supplied (both are treated as defname superuser) and check that the arg is set to true
-            if (strcmp(defel->defname, "superuser") == 0 && defGetBoolean(defel)){
+            if (strcmp(defel->defname, "superuser") == 0 && defGetBoolean(defel))
+            {
                 allow_role_stmt();
             }
         }
         break;
     case T_CreateRoleStmt: // CREATE ROLE
         createRoleStmt = (CreateRoleStmt *)stmt;
-        
-        foreach(option, createRoleStmt->options)
-		{	
-            defel = (DefElem *) lfirst(option);
+
+        foreach (option, createRoleStmt->options)
+        {
+            defel = (DefElem *)lfirst(option);
 
             // check if we are granting superuser
             if (strcmp(defel->defname, "superuser") == 0 && defGetBoolean(defel))
                 allow_role_stmt();
-            
+
             // check if user is being added to a role that has superuser
             if (strcmp(defel->defname, "addroleto") == 0)
             {
-				addroleto = (List *) defel->arg;
+                addroleto = (List *)defel->arg;
                 allow_granted_roles(addroleto);
             }
         }
         break;
-    case T_DropRoleStmt:   // DROP ROLE
+    case T_DropRoleStmt: // DROP ROLE
         // don't allow dropping role from elevated context
         // this should be a check for dropping reserved roles
         // allow_role_stmt();
         break;
-    case T_GrantRoleStmt:  // GRANT ROLE
-        grantRoleStmt = (GrantRoleStmt *) stmt;
-        
+    case T_GrantRoleStmt: // GRANT ROLE
+        grantRoleStmt = (GrantRoleStmt *)stmt;
+
         // check if any of the granted roles have superuser permission
-        foreach(grantRoleCell, grantRoleStmt->granted_roles)
-		{
-            priv = (AccessPriv *) lfirst(grantRoleCell);
+        foreach (grantRoleCell, grantRoleStmt->granted_roles)
+        {
+            priv = (AccessPriv *)lfirst(grantRoleCell);
             roleoid = get_role_oid(priv->priv_name, false);
             allow_grant_role(roleoid);
         }

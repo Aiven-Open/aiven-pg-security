@@ -19,8 +19,8 @@
 #if PG14_GTE
 #define PROCESS_UTILITY_PARAMS                                                 \
     PlannedStmt *pstmt, const char *queryString, bool readOnlyTree,            \
-        ProcessUtilityContext context, ParamListInfo params,                   \
-        QueryEnvironment *queryEnv, DestReceiver *dest, QueryCompletion *qc
+    ProcessUtilityContext context, ParamListInfo params,                   \
+    QueryEnvironment *queryEnv, DestReceiver *dest, QueryCompletion *qc
 #define PROCESS_UTILITY_ARGS                                                   \
     pstmt, queryString, readOnlyTree, context, params, queryEnv, dest, qc
 
@@ -28,8 +28,8 @@
 
 #define PROCESS_UTILITY_PARAMS                                                 \
     PlannedStmt *pstmt, const char *queryString,                               \
-        ProcessUtilityContext context, ParamListInfo params,                   \
-        QueryEnvironment *queryEnv, DestReceiver *dest, QueryCompletion *qc
+    ProcessUtilityContext context, ParamListInfo params,                   \
+    QueryEnvironment *queryEnv, DestReceiver *dest, QueryCompletion *qc
 #define PROCESS_UTILITY_ARGS                                                   \
     pstmt, queryString, context, params, queryEnv, dest, qc
 
@@ -37,8 +37,8 @@
 
 #define PROCESS_UTILITY_PARAMS                                                 \
     PlannedStmt *pstmt, const char *queryString,                               \
-        ProcessUtilityContext context, ParamListInfo params,                   \
-        QueryEnvironment *queryEnv, DestReceiver *dest, char *completionTag
+    ProcessUtilityContext context, ParamListInfo params,                   \
+    QueryEnvironment *queryEnv, DestReceiver *dest, char *completionTag
 
 #define PROCESS_UTILITY_ARGS                                                   \
     pstmt, queryString, context, params, queryEnv, dest, completionTag
