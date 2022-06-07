@@ -29,11 +29,33 @@ PG_MODULE_MAGIC;
 void _PG_init(void);
 void _PG_fini(void);
 
+static bool is_elevated(void);
+static bool is_security_restricted(void);
+static void gatekeeper_checks(PROCESS_UTILITY_PARAMS);
+static void allow_role_stmt(void);
+static void allow_granted_roles(List *addroleto);
+static void allow_grant_role(Oid role_oid);
+static bool allowed_guc_change_check_hook(bool *newval, void **extra, GucSource source);
+
 /* GUC Variables */
+static bool pg_security_agent_enabled = false;
 
 /* Saved hook values in case of unload */
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 
+static bool
+allowed_guc_change_check_hook(bool *newval, void **extra, GucSource source)
+{
+    /* don't allow setting the config value from an elevated context
+     * otherwise a combination of ALTER SYSTEM SET aiven.pg_security_agent TO off;
+     * SELECT pg_reload_conf(); could be used in a two step attack to disable
+     * the security agent. Only allow setting the security agent if the current session is
+     * a superuser session (eg: login as postgres).
+     * We should be safe-ish anyway, as ALTER SYSTEM can't be executed from a function. But
+     * doesn't hurt to be careful.
+     */
+    return !(creating_extension || is_security_restricted() || is_elevated());
+}
 /* returns true if the session and current user ids are different */
 static bool
 is_elevated(void)
@@ -103,14 +125,41 @@ allow_granted_roles(List *addroleto)
 static void
 allow_grant_role(Oid role_oid)
 {
-    // check if any of the roles we are trying to add to have superuser
-    if (superuser_arg(role_oid))
+    /* check we aren't granting superuser or privileged roles
+     * we first need to fetch the oid's of the reserved roles.
+     * these would be nice to pull from header files, but the required
+     * headers are generated using src/backend/catalog/genbki.pl and aren't guaranteed to exist.
+     */
+    Oid role_pg_execute_server_program;
+    Oid role_pg_read_server_files;
+    Oid role_pg_write_server_files;
+
+    role_pg_execute_server_program = get_role_oid("pg_execute_server_program", true);
+    role_pg_read_server_files = get_role_oid("pg_read_server_files", true);
+    role_pg_write_server_files = get_role_oid("pg_write_server_files", true);
+
+    if (superuser_arg(role_oid) ||
+        is_member_of_role(role_oid, role_pg_execute_server_program) ||
+        is_member_of_role(role_oid, role_pg_read_server_files) ||
+        is_member_of_role(role_oid, role_pg_write_server_files))
         allow_role_stmt();
 }
 
 static void
 gatekeeper_checks(PROCESS_UTILITY_PARAMS)
 {
+    /* if the agent is disabled, skip all checks */
+    if (!pg_security_agent_enabled)
+    {
+        /* execute the actual query */
+        if (prev_ProcessUtility)
+            prev_ProcessUtility(PROCESS_UTILITY_ARGS);
+        else
+            standard_ProcessUtility(PROCESS_UTILITY_ARGS);
+
+        /* we are done executing, exit the function */
+        return;
+    }
 
     /* get the utilty statment from the planner
      * https://github.com/postgres/postgres/blob/24d2b2680a8d0e01b30ce8a41c4eb3b47aca5031/src/backend/tcop/utility.c#L575
@@ -239,6 +288,17 @@ void _PG_init(void)
 {
     /* Define custom GUC variables. */
 
+    // allow toggling of the security agent
+    DefineCustomBoolVariable("aiven.pg_security_agent",
+                             "Toggle the security agent checks on and off",
+                             NULL,
+                             &pg_security_agent_enabled,
+                             true,               // default to 'on'
+                             PGC_SIGHUP,         // only superusers can set, or at postmaster startup
+                             GUC_SUPERUSER_ONLY, // only show to superuser
+                             allowed_guc_change_check_hook,
+                             NULL,
+                             NULL);
     /* Install Hooks */
     prev_ProcessUtility = ProcessUtility_hook;
     ProcessUtility_hook = gatekeeper_checks;

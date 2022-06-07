@@ -45,10 +45,3 @@
 
 #endif
 
-
-static bool is_elevated(void);
-static bool is_security_restricted(void);
-static void gatekeeper_checks(PROCESS_UTILITY_PARAMS);
-static void allow_role_stmt(void);
-static void allow_granted_roles(List *addroleto);
-static void allow_grant_role(Oid role_oid);
