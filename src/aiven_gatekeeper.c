@@ -281,7 +281,7 @@ void _PG_init(void)
                              "Toggle the security agent checks on and off",
                              NULL,
                              &pg_security_agent_enabled,
-                             true,
+                             true,               // default to 'on'
                              PGC_SIGHUP,         // only superusers can set, or at postmaster startup
                              GUC_SUPERUSER_ONLY, // only show to superuser
                              allowed_guc_change_check_hook,
