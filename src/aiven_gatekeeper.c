@@ -12,6 +12,7 @@
 #include "postgres.h"
 
 #include "access/xact.h"
+#include "catalog/pg_authid.h"
 #include "commands/extension.h"
 #include "commands/defrem.h"
 #include "nodes/value.h"
@@ -29,8 +30,16 @@ PG_MODULE_MAGIC;
 void _PG_init(void);
 void _PG_fini(void);
 
+static bool is_elevated(void);
+static bool is_security_restricted(void);
+static void gatekeeper_checks(PROCESS_UTILITY_PARAMS);
+static void allow_role_stmt(void);
+static void allow_granted_roles(List *addroleto);
+static void allow_grant_role(Oid role_oid);
+static bool allowed_guc_change_check_hook(bool *newval, void **extra, GucSource source);
+
 /* GUC Variables */
-bool pg_security_agent_enabled = false;
+static bool pg_security_agent_enabled = false;
 
 /* Saved hook values in case of unload */
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
@@ -46,10 +55,7 @@ allowed_guc_change_check_hook(bool *newval, void **extra, GucSource source)
      * We should be safe-ish anyway, as ALTER SYSTEM can't be executed from a function. But
      * doesn't hurt to be careful.
      */
-    if (creating_extension || is_security_restricted() || is_elevated())
-        return false;
-
-    return true;
+    return !(creating_extension || is_security_restricted() || is_elevated());
 }
 /* returns true if the session and current user ids are different */
 static bool
@@ -120,14 +126,28 @@ allow_granted_roles(List *addroleto)
 static void
 allow_grant_role(Oid role_oid)
 {
-    // check if any of the roles we are trying to add to have superuser
-    if (superuser_arg(role_oid))
+    /* check we aren't granting superuser or privileged roles
+     */
+    if (superuser_arg(role_oid) ||
+        is_member_of_role(role_oid, ROLE_PG_EXECUTE_SERVER_PROGRAM) ||
+        is_member_of_role(role_oid, ROLE_PG_READ_SERVER_FILES) ||
+        is_member_of_role(role_oid, ROLE_PG_WRITE_SERVER_FILES))
         allow_role_stmt();
 }
 
 static void
 gatekeeper_checks(PROCESS_UTILITY_PARAMS)
 {
+    /* if the agent is disabled, skip all checks */
+    if (!pg_security_agent_enabled)
+    {
+        /* execute the actual query */
+        if (prev_ProcessUtility)
+            prev_ProcessUtility(PROCESS_UTILITY_ARGS);
+        else
+            standard_ProcessUtility(PROCESS_UTILITY_ARGS);
+    }
+
     /* get the utilty statment from the planner
      * https://github.com/postgres/postgres/blob/24d2b2680a8d0e01b30ce8a41c4eb3b47aca5031/src/backend/tcop/utility.c#L575
      */
@@ -142,16 +162,6 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
     ListCell *grantRoleCell;
     AccessPriv *priv;
     Oid roleoid;
-
-    /* if the agent is disabled, skip all checks */
-    if (!pg_security_agent_enabled)
-    {
-        /* execute the actual query */
-        if (prev_ProcessUtility)
-            prev_ProcessUtility(PROCESS_UTILITY_ARGS);
-        else
-            standard_ProcessUtility(PROCESS_UTILITY_ARGS);
-    }
 
     /* switch between the types to see if we care about this stmt */
     switch (stmt->type)
