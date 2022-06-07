@@ -30,10 +30,27 @@ void _PG_init(void);
 void _PG_fini(void);
 
 /* GUC Variables */
+bool pg_security_agent_enabled = false;
 
 /* Saved hook values in case of unload */
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 
+static bool
+allowed_guc_change_check_hook(bool *newval, void **extra, GucSource source)
+{
+    /* don't allow setting the config value from an elevated context
+     * otherwise a combination of ALTER SYSTEM SET aiven.pg_security_agent TO off;
+     * SELECT pg_reload_conf(); could be used in a two step attack to disable
+     * the security agent. Only allow setting the security agent if the current session is
+     * a superuser session (eg: login as postgres).
+     * We should be safe-ish anyway, as ALTER SYSTEM can't be executed from a function. But
+     * doesn't hurt to be careful.
+     */
+    if (creating_extension || is_security_restricted() || is_elevated())
+        return false;
+
+    return true;
+}
 /* returns true if the session and current user ids are different */
 static bool
 is_elevated(void)
@@ -111,7 +128,6 @@ allow_grant_role(Oid role_oid)
 static void
 gatekeeper_checks(PROCESS_UTILITY_PARAMS)
 {
-
     /* get the utilty statment from the planner
      * https://github.com/postgres/postgres/blob/24d2b2680a8d0e01b30ce8a41c4eb3b47aca5031/src/backend/tcop/utility.c#L575
      */
@@ -126,6 +142,16 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
     ListCell *grantRoleCell;
     AccessPriv *priv;
     Oid roleoid;
+
+    /* if the agent is disabled, skip all checks */
+    if (!pg_security_agent_enabled)
+    {
+        /* execute the actual query */
+        if (prev_ProcessUtility)
+            prev_ProcessUtility(PROCESS_UTILITY_ARGS);
+        else
+            standard_ProcessUtility(PROCESS_UTILITY_ARGS);
+    }
 
     /* switch between the types to see if we care about this stmt */
     switch (stmt->type)
@@ -240,6 +266,17 @@ void _PG_init(void)
 {
     /* Define custom GUC variables. */
 
+    // allow toggling of the security agent
+    DefineCustomBoolVariable("aiven.pg_security_agent",
+                             "Toggle the security agent checks on and off",
+                             NULL,
+                             &pg_security_agent_enabled,
+                             true,
+                             PGC_SIGHUP,         // only superusers can set, or at postmaster startup
+                             GUC_SUPERUSER_ONLY, // only show to superuser
+                             allowed_guc_change_check_hook,
+                             NULL,
+                             NULL);
     /* Install Hooks */
     prev_ProcessUtility = ProcessUtility_hook;
     ProcessUtility_hook = gatekeeper_checks;

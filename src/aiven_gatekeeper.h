@@ -52,3 +52,4 @@ static void gatekeeper_checks(PROCESS_UTILITY_PARAMS);
 static void allow_role_stmt(void);
 static void allow_granted_roles(List *addroleto);
 static void allow_grant_role(Oid role_oid);
+static bool allowed_guc_change_check_hook(bool *newval, void **extra, GucSource source);
