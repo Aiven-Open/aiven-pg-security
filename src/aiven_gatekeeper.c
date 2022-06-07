@@ -12,7 +12,6 @@
 #include "postgres.h"
 
 #include "access/xact.h"
-#include "catalog/pg_authid.h"
 #include "commands/extension.h"
 #include "commands/defrem.h"
 #include "nodes/value.h"
@@ -127,11 +126,22 @@ static void
 allow_grant_role(Oid role_oid)
 {
     /* check we aren't granting superuser or privileged roles
+     * we first need to fetch the oid's of the reserved roles.
+     * these would be nice to pull from header files, but the required
+     * headers are generated using src/backend/catalog/genbki.pl and aren't guaranteed to exist.
      */
+    Oid role_pg_execute_server_program;
+    Oid role_pg_read_server_files;
+    Oid role_pg_write_server_files;
+
+    role_pg_execute_server_program = get_role_oid("pg_execute_server_program", true);
+    role_pg_read_server_files = get_role_oid("pg_read_server_files", true);
+    role_pg_write_server_files = get_role_oid("pg_write_server_files", true);
+
     if (superuser_arg(role_oid) ||
-        is_member_of_role(role_oid, ROLE_PG_EXECUTE_SERVER_PROGRAM) ||
-        is_member_of_role(role_oid, ROLE_PG_READ_SERVER_FILES) ||
-        is_member_of_role(role_oid, ROLE_PG_WRITE_SERVER_FILES))
+        is_member_of_role(role_oid, role_pg_execute_server_program) ||
+        is_member_of_role(role_oid, role_pg_read_server_files) ||
+        is_member_of_role(role_oid, role_pg_write_server_files))
         allow_role_stmt();
 }
 
