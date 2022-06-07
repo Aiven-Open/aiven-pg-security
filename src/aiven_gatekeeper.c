@@ -131,7 +131,6 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
     switch (stmt->type)
     {
     case T_AlterRoleStmt: // ALTER ROLE
-    case T_AlterRoleSetStmt:
         alterRoleStmt = (AlterRoleStmt *)stmt;
         // check if we are altering with superuser
 
