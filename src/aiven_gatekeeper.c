@@ -156,6 +156,9 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
             prev_ProcessUtility(PROCESS_UTILITY_ARGS);
         else
             standard_ProcessUtility(PROCESS_UTILITY_ARGS);
+
+        /* we are done executing, exit the function */
+        return;
     }
 
     /* get the utilty statment from the planner
