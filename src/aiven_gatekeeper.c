@@ -148,6 +148,18 @@ allow_grant_role(Oid role_oid)
 static void
 gatekeeper_checks(PROCESS_UTILITY_PARAMS)
 {
+    Node *stmt;
+    CopyStmt *copyStmt;
+    CreateRoleStmt *createRoleStmt;
+    AlterRoleStmt *alterRoleStmt;
+    GrantRoleStmt *grantRoleStmt;
+    ListCell *option;
+    DefElem *defel;
+    List *addroleto;
+    ListCell *grantRoleCell;
+    AccessPriv *priv;
+    Oid roleoid;
+
     /* if the agent is disabled, skip all checks */
     if (!pg_security_agent_enabled)
     {
@@ -163,19 +175,7 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
 
     /* get the utilty statment from the planner
      * https://github.com/postgres/postgres/blob/24d2b2680a8d0e01b30ce8a41c4eb3b47aca5031/src/backend/tcop/utility.c#L575
-     */
-    Node *stmt;
-    CopyStmt *copyStmt;
-    CreateRoleStmt *createRoleStmt;
-    AlterRoleStmt *alterRoleStmt;
-    GrantRoleStmt *grantRoleStmt;
-    ListCell *option;
-    DefElem *defel;
-    List *addroleto;
-    ListCell *grantRoleCell;
-    AccessPriv *priv;
-    Oid roleoid;
-    
+     */    
     stmt = pstmt->utilityStmt;
 
     /* switch between the types to see if we care about this stmt */
