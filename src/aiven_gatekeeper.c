@@ -61,7 +61,8 @@ static const char *reserved_func_names[] = {"pg_read_file",
                                             "be_lo_import_with_oid"};
 static const int NUM_RESERVED_FUNCS = sizeof reserved_func_names / sizeof reserved_func_names[0];
 static Oid *reserved_func_oids; // array to track the oids of the above reserved_func_names
-static int max_reserved_oid;
+static int max_reserved_oid = 0;
+static int min_reserved_oid = 9000;
 
 /* GUC Variables */
 static bool pg_security_agent_enabled = false;
@@ -329,13 +330,13 @@ fmgr_lookupByName(const char *name)
 static void
 set_reserved_oids()
 {
-    /* sets the max_reserved_oid variable, allowing for skipping builtins search
+    /* sets the min and max_reserved_oid variables, allowing for skipping builtins search
      * if an oid is clearly not going to be in the builtins.
      */
     const FmgrBuiltin *builtin;
     int i;
 
-    reserved_func_oids = (Oid*)malloc(NUM_RESERVED_FUNCS * sizeof(Oid));
+    reserved_func_oids = (Oid *)malloc(NUM_RESERVED_FUNCS * sizeof(Oid));
 
     /* loop through the function names we have defined as reserved
      * lookup the oid of the function so that we can use this for future
@@ -347,7 +348,11 @@ set_reserved_oids()
         if ((builtin = fmgr_lookupByName(reserved_func_names[i])) != NULL)
         {
             reserved_func_oids[i] = builtin->foid;
-            if (builtin->foid > max_reserved_oid)
+            if (builtin->foid < min_reserved_oid)
+            {
+                min_reserved_oid = builtin->foid;
+            }
+            else if (builtin->foid > max_reserved_oid)
             {
                 max_reserved_oid = builtin->foid;
             }
@@ -379,7 +384,7 @@ gatekeeper_oa_hook(ObjectAccessType access,
              * this allows faster evalation, rather than having to loop through
              * arrays for each function call.
              */
-            if (objectId <= max_reserved_oid)
+            if (objectId >= min_reserved_oid && objectId <= max_reserved_oid)
             {
                 for (i = 0; i < NUM_RESERVED_FUNCS; i++)
                 {
@@ -394,6 +399,7 @@ gatekeeper_oa_hook(ObjectAccessType access,
                             if ((builtin = fmgr_lookupByName(reserved_func_names[i])) != NULL)
                             {
                                 elog(ERROR, "using builtin function %s is not allowed", builtin->funcName);
+                                return;
                             }
                         }
                         /* extra check, this is to enforce only superuser can call this function in normal
@@ -407,6 +413,7 @@ gatekeeper_oa_hook(ObjectAccessType access,
                             if ((builtin = fmgr_lookupByName(reserved_func_names[i])) != NULL)
                             {
                                 elog(ERROR, "using builtin function %s is not allowed by non-superusers", builtin->funcName);
+                                return;
                             }
                         }
                         break;
