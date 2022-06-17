@@ -4,9 +4,11 @@ Adds utility functions to harden PostgreSQL through shared libraries and hooks.
 
 Overview
 ========
+The Aiven Security Agent for Postgresql (aiven-gatekeeper) allows controlling which functions are exposed and prevents common privilege escalation attacks.
 
 Features
 ============
+Prevents common privilege escalation attacks, primarily at the time of extension creation. Limits access to sensitive features and functions within Postgresql and compliments the existing grants and superuser checks.
 
 Setup
 ============
