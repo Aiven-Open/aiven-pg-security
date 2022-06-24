@@ -12,14 +12,17 @@
 #include "postgres.h"
 
 #include "access/xact.h"
+#include "catalog/objectaccess.h"
 #include "commands/extension.h"
 #include "commands/defrem.h"
 #include "nodes/value.h"
+#include "fmgr.h"
 #include "miscadmin.h"
 #include "tcop/utility.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include "utils/fmgrtab.h"
 #include "nodes/nodes.h"
 
 #include "aiven_gatekeeper.h"
@@ -32,16 +35,42 @@ void _PG_fini(void);
 static bool is_elevated(void);
 static bool is_security_restricted(void);
 static void gatekeeper_checks(PROCESS_UTILITY_PARAMS);
+static void gatekeeper_oa_hook(ObjectAccessType access,
+                               Oid classId,
+                               Oid objectId,
+                               int subId,
+                               void *arg);
 static void allow_role_stmt(void);
 static void allow_granted_roles(List *addroleto);
 static void allow_grant_role(Oid role_oid);
 static bool allowed_guc_change_check_hook(bool *newval, void **extra, GucSource source);
+
+/* disallow-list of reserved functions we don't want to give access to
+ * as these can be abused in to get local filesystem access or as a step
+ * in gaining code execution.
+ */
+static const char *reserved_func_names[] = {"pg_read_file",
+                                            "pg_read_file_off_len",
+                                            "pg_read_file_v2",
+                                            "pg_read_file_all",
+                                            "pg_read_binary_file",
+                                            "pg_read_binary_file_all",
+                                            "pg_read_binary_file_off_len",
+                                            "pg_reload_conf",
+                                            "be_lo_import",
+                                            "be_lo_export",
+                                            "be_lo_import_with_oid"};
+static const int NUM_RESERVED_FUNCS = sizeof reserved_func_names / sizeof reserved_func_names[0];
+static Oid *reserved_func_oids; // array to track the oids of the above reserved_func_names
+static int max_reserved_oid = 0;
+static int min_reserved_oid = 9000;
 
 /* GUC Variables */
 static bool pg_security_agent_enabled = false;
 
 /* Saved hook values in case of unload */
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
+static object_access_hook_type next_object_access_hook = NULL;
 
 static bool
 allowed_guc_change_check_hook(bool *newval, void **extra, GucSource source)
@@ -148,6 +177,18 @@ allow_grant_role(Oid role_oid)
 static void
 gatekeeper_checks(PROCESS_UTILITY_PARAMS)
 {
+    Node *stmt;
+    CopyStmt *copyStmt;
+    CreateRoleStmt *createRoleStmt;
+    AlterRoleStmt *alterRoleStmt;
+    GrantRoleStmt *grantRoleStmt;
+    ListCell *option;
+    DefElem *defel;
+    List *addroleto;
+    ListCell *grantRoleCell;
+    AccessPriv *priv;
+    Oid roleoid;
+
     /* if the agent is disabled, skip all checks */
     if (!pg_security_agent_enabled)
     {
@@ -164,18 +205,7 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
     /* get the utilty statment from the planner
      * https://github.com/postgres/postgres/blob/24d2b2680a8d0e01b30ce8a41c4eb3b47aca5031/src/backend/tcop/utility.c#L575
      */
-    Node *stmt = pstmt->utilityStmt;
-    CopyStmt *copyStmt;
-    CreateRoleStmt *createRoleStmt;
-    AlterRoleStmt *alterRoleStmt;
-    GrantRoleStmt *grantRoleStmt;
-    ListCell *option;
-    DefElem *defel;
-    List *addroleto;
-    ListCell *grantRoleCell;
-    AccessPriv *priv;
-    Oid roleoid;
-
+    stmt = pstmt->utilityStmt;
     /* switch between the types to see if we care about this stmt */
     switch (stmt->type)
     {
@@ -281,6 +311,126 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
         standard_ProcessUtility(PROCESS_UTILITY_ARGS);
 }
 
+/* straight copy from fmgr.c
+ * this function isn't exported by fmgr.c, so just
+ * recreate it here
+ */
+static const FmgrBuiltin *
+fmgr_lookupByName(const char *name)
+{
+    int i;
+
+    for (i = 0; i < fmgr_nbuiltins; i++)
+    {
+        if (strcmp(name, fmgr_builtins[i].funcName) == 0)
+            return fmgr_builtins + i;
+    }
+    return NULL;
+}
+
+static void
+set_reserved_oids()
+{
+    /* sets the min and max_reserved_oid variables, allowing for skipping builtins search
+     * if an oid is clearly not going to be in the builtins.
+     */
+    const FmgrBuiltin *builtin;
+    int i;
+
+    reserved_func_oids = (Oid *)malloc(NUM_RESERVED_FUNCS * sizeof(Oid));
+
+    /* loop through the function names we have defined as reserved
+     * lookup the oid of the function so that we can use this for future
+     * evaluations rather than comparing strings
+     * and find the maximum oid
+     */
+    for (i = 0; i < NUM_RESERVED_FUNCS; i++)
+    {
+        if ((builtin = fmgr_lookupByName(reserved_func_names[i])) != NULL)
+        {
+            reserved_func_oids[i] = builtin->foid;
+            if (builtin->foid < min_reserved_oid)
+            {
+                min_reserved_oid = builtin->foid;
+            }
+            else if (builtin->foid > max_reserved_oid)
+            {
+                max_reserved_oid = builtin->foid;
+            }
+        }
+    }
+}
+
+/* hook to check if the function being called is not in the disallowed-list
+ * obviously allow list of built-in functions would be prefered, but this list of disallowed is tiny
+ * and we want to ensure minimum impact on performance and function.
+ */
+static void
+gatekeeper_oa_hook(ObjectAccessType access,
+                   Oid classId,
+                   Oid objectId,
+                   int subId,
+                   void *arg)
+{
+    const FmgrBuiltin *builtin;
+    int i;
+
+    /* only check function if security agent is enabled */
+    if (pg_security_agent_enabled)
+    {
+        switch (access) // we are only interested in the OAT_FUNCTION_EXECUTE ObjectAccessType
+        {
+        case OAT_FUNCTION_EXECUTE:
+            /* check if the objecid is within range of our reserved oids
+             * this allows faster evalation, rather than having to loop through
+             * arrays for each function call.
+             */
+            if (objectId >= min_reserved_oid && objectId <= max_reserved_oid)
+            {
+                for (i = 0; i < NUM_RESERVED_FUNCS; i++)
+                {
+                    /* lookup the oid to see if it is in our reserved list
+                     */
+                    if (reserved_func_oids[i] == objectId)
+                    {
+                        /* check if we are in a privileged context and disallow the function executions */
+                        if (creating_extension || is_elevated() || is_security_restricted())
+                        {
+                            /* get the function information so that error message can be more friendly */
+                            if ((builtin = fmgr_lookupByName(reserved_func_names[i])) != NULL)
+                            {
+                                elog(ERROR, "using builtin function %s is not allowed", builtin->funcName);
+                                return;
+                            }
+                        }
+                        /* extra check, this is to enforce only superuser can call this function in normal
+                         * context. Otherwise PG uses the grant system, which could lead to roles being
+                         * granted execute privilege on the funcion and still being able to call it.
+                         * This is not too serious, since non-superusers can't read outside reserved paths (for example)
+                         * but rather be strict.
+                         */
+                        if (!superuser())
+                        {
+                            if ((builtin = fmgr_lookupByName(reserved_func_names[i])) != NULL)
+                            {
+                                elog(ERROR, "using builtin function %s is not allowed by non-superusers", builtin->funcName);
+                                return;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            break;
+        default:
+            break;
+        }
+    }
+
+    if (next_object_access_hook)
+        (*next_object_access_hook)(access, classId, objectId, subId, arg);
+}
+
 /*
  * Module Load Callback
  */
@@ -299,9 +449,15 @@ void _PG_init(void)
                              allowed_guc_change_check_hook,
                              NULL,
                              NULL);
+
+    set_reserved_oids();
+
     /* Install Hooks */
     prev_ProcessUtility = ProcessUtility_hook;
     ProcessUtility_hook = gatekeeper_checks;
+
+    next_object_access_hook = object_access_hook;
+    object_access_hook = gatekeeper_oa_hook;
 }
 
 /*
@@ -311,4 +467,5 @@ void _PG_fini(void)
 {
     /* Uninstall hooks. */
     ProcessUtility_hook = prev_ProcessUtility;
+    object_access_hook = next_object_access_hook;
 }
