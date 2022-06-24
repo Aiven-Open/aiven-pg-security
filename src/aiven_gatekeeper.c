@@ -56,6 +56,7 @@ static const char *reserved_func_names[] = {"pg_read_file",
                                             "pg_read_binary_file",
                                             "pg_read_binary_file_all",
                                             "pg_read_binary_file_off_len",
+                                            "pg_reload_conf",
                                             "be_lo_import",
                                             "be_lo_export",
                                             "be_lo_import_with_oid"};
