@@ -183,6 +183,7 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
     AlterRoleStmt *alterRoleStmt;
     GrantRoleStmt *grantRoleStmt;
     CreateFunctionStmt *createFuncStmt;
+    CreateExtensionStmt *createExtStmt;
     ListCell *option;
     DefElem *defel;
     List *addroleto;
@@ -310,24 +311,41 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
             /* check if of language type internal
              * this is not accessible to untrusted users, so disable if elevated context
              */
-            if (strcmp(defel->defname, "language") == 0 && strcmp(defGetString(defel), "internal") == 0)
+            if (strcmp(defel->defname, "language") == 0)
             {
+                /* check if restricted language type */
+                if (strcmp(defGetString(defel), "internal") != 0 &&
+                    strcmp(defGetString(defel), "plperlu") != 0 &&
+                    strcmp(defGetString(defel), "plpythonu") != 0)
+                {
+                    break;
+                }
+
                 if (creating_extension)
                 {
-                    elog(ERROR, "LANGUAGE internal not allowed in extensions");
+                    elog(ERROR, "LANGUAGE %s not allowed in extensions", defGetString(defel));
                     return;
                 }
                 if (is_security_restricted())
                 {
-                    elog(ERROR, "LANGUAGE internal not allowed in SECURITY_RESTRICTED_OPERATION");
+                    elog(ERROR, "LANGUAGE %s not allowed in SECURITY_RESTRICTED_OPERATION", defGetString(defel));
                     return;
                 }
                 if (is_elevated())
                 {
-                    elog(ERROR, "LANGUAGE internal not allowed");
+                    elog(ERROR, "LANGUAGE %s not allowed", defGetString(defel));
                     return;
                 }
             }
+        }
+        break;
+    case T_CreateExtensionStmt:
+        /* block file_fdw extension. Case sensitive compare is ok, since the extension name is lower case when read from extname*/
+        createExtStmt = (CreateExtensionStmt *)stmt;
+        if (strcmp(createExtStmt->extname, "file_fdw") == 0)
+        {
+            elog(ERROR, "file_fdw extension not allowed");
+            return;
         }
         break;
     default:
