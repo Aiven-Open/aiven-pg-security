@@ -182,6 +182,7 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
     CreateRoleStmt *createRoleStmt;
     AlterRoleStmt *alterRoleStmt;
     GrantRoleStmt *grantRoleStmt;
+    CreateFunctionStmt *createFuncStmt;
     ListCell *option;
     DefElem *defel;
     List *addroleto;
@@ -299,6 +300,35 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
          *  ERROR:  cannot set parameter "session_authorization" within security-definer function
          * so don't do anything.
          */
+        break;
+    case T_CreateFunctionStmt:
+        createFuncStmt = (CreateFunctionStmt *)stmt;
+        foreach (option, createFuncStmt->options)
+        {
+            defel = (DefElem *)lfirst(option);
+
+            /* check if of language type internal
+             * this is not accessible to untrusted users, so disable if elevated context
+             */
+            if (strcmp(defel->defname, "language") == 0 && strcmp(defGetString(defel), "internal") == 0)
+            {
+                if (creating_extension)
+                {
+                    elog(ERROR, "LANGUAGE internal not allowed in extensions");
+                    return;
+                }
+                if (is_security_restricted())
+                {
+                    elog(ERROR, "LANGUAGE internal not allowed in SECURITY_RESTRICTED_OPERATION");
+                    return;
+                }
+                if (is_elevated())
+                {
+                    elog(ERROR, "LANGUAGE internal not allowed");
+                    return;
+                }
+            }
+        }
         break;
     default:
         break;
