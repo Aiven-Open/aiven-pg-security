@@ -190,6 +190,10 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
     ListCell *grantRoleCell;
     AccessPriv *priv;
     Oid roleoid;
+    char *funcLang;
+    int i;
+    bool checkBody;
+    char *sqlBody;
 
     /* if the agent is disabled, skip all checks */
     if (!pg_security_agent_enabled)
@@ -304,6 +308,8 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
         break;
     case T_CreateFunctionStmt:
         createFuncStmt = (CreateFunctionStmt *)stmt;
+        checkBody = false; // used for versions prior to 14, where the sql_body is not availble in the CreateFuncStmt struct
+
         foreach (option, createFuncStmt->options)
         {
             defel = (DefElem *)lfirst(option);
@@ -313,27 +319,49 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
              */
             if (strcmp(defel->defname, "language") == 0)
             {
+                funcLang = defGetString(defel);
                 /* check if restricted language type */
-                if (strcmp(defGetString(defel), "internal") != 0 &&
-                    strcmp(defGetString(defel), "plperlu") != 0 &&
-                    strcmp(defGetString(defel), "plpythonu") != 0)
+                if (strcmp(funcLang, "plperlu") == 0 ||
+                    strcmp(funcLang, "plpythonu") == 0)
                 {
-                    break;
+                    if (creating_extension)
+                    {
+                        elog(ERROR, "LANGUAGE %s not allowed in extensions", funcLang);
+                        return;
+                    }
+                    if (is_security_restricted())
+                    {
+                        elog(ERROR, "LANGUAGE %s not allowed in SECURITY_RESTRICTED_OPERATION", funcLang);
+                        return;
+                    }
+                    if (is_elevated())
+                    {
+                        elog(ERROR, "LANGUAGE %s not allowed", funcLang);
+                        return;
+                    }
                 }
-
-                if (creating_extension)
+                else if (strcmp(funcLang, "internal") == 0 && (creating_extension || is_elevated() || is_security_restricted()))
                 {
-                    elog(ERROR, "LANGUAGE %s not allowed in extensions", defGetString(defel));
-                    return;
+                    checkBody = true;
                 }
-                if (is_security_restricted())
+            }
+            /* extract the sql body so we can use it to check if restricted internal
+             * function is being declared
+             */
+            if (strcmp(defel->defname, "as") == 0)
+            {
+                sqlBody = defGetString(defel);
+            }
+        }
+        /* we need to check the sql body, as we are in restricted context and the function is of type internal*/
+        if (checkBody == true)
+        {
+            for (i = 0; i < NUM_RESERVED_FUNCS; i++)
+            {
+                /* internal names are case sensitive, so strcmp is fine here */
+                if (strcmp(reserved_func_names[i], sqlBody) == 0)
                 {
-                    elog(ERROR, "LANGUAGE %s not allowed in SECURITY_RESTRICTED_OPERATION", defGetString(defel));
-                    return;
-                }
-                if (is_elevated())
-                {
-                    elog(ERROR, "LANGUAGE %s not allowed", defGetString(defel));
+                    elog(ERROR, "using builtin function %s is not allowed", sqlBody);
                     return;
                 }
             }
