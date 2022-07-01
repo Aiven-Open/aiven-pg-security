@@ -15,6 +15,8 @@
 #include "catalog/objectaccess.h"
 #include "commands/extension.h"
 #include "commands/defrem.h"
+#include "commands/explain.h"
+#include "executor/instrument.h"
 #include "nodes/value.h"
 #include "fmgr.h"
 #include "miscadmin.h"
@@ -71,6 +73,7 @@ static bool pg_security_agent_enabled = false;
 /* Saved hook values in case of unload */
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 static object_access_hook_type next_object_access_hook = NULL;
+static ExecutorStart_hook_type prev_ExecutorStart_hook = NULL;
 
 static bool
 allowed_guc_change_check_hook(bool *newval, void **extra, GucSource source)
@@ -507,6 +510,40 @@ gatekeeper_oa_hook(ObjectAccessType access,
         (*next_object_access_hook)(access, classId, objectId, subId, arg);
 }
 
+static void
+pg_proc_guard_checks(QueryDesc *queryDesc, int eflags)
+{
+    /* check if there is an attempt to modify the pg_proc table 
+    * this should never happen directly in extension installs
+    * or elevated context. Superuser is allowed to modify pg_proc, but
+    * probably doesn't want to be doing this manually.
+    */
+    ListCell *resultRelations;
+    switch (queryDesc->operation)
+    {
+    case CMD_INSERT:
+    case CMD_UPDATE:
+        foreach (resultRelations, queryDesc->plannedstmt->rtable)
+        {
+            RangeTblEntry *rt = lfirst(resultRelations);
+            if (rt->relid == 1255) // update with lookup for pg_proc oid
+            {
+                if (creating_extension || is_elevated() || is_security_restricted())
+                {
+                    elog(ERROR, "Modifying pg_proc is not allowed in elevated context");
+                    return;
+                }
+            }
+        }
+        break;
+    default:
+        break;
+    }
+    if (prev_ExecutorStart_hook)
+        prev_ExecutorStart_hook(queryDesc, eflags);
+    else
+        standard_ExecutorStart(queryDesc, eflags);
+}
 /*
  * Module Load Callback
  */
@@ -534,6 +571,9 @@ void _PG_init(void)
 
     next_object_access_hook = object_access_hook;
     object_access_hook = gatekeeper_oa_hook;
+
+    prev_ExecutorStart_hook = ExecutorStart_hook;
+    ExecutorStart_hook = pg_proc_guard_checks;
 }
 
 /*
@@ -544,4 +584,5 @@ void _PG_fini(void)
     /* Uninstall hooks. */
     ProcessUtility_hook = prev_ProcessUtility;
     object_access_hook = next_object_access_hook;
+    ExecutorStart_hook = prev_ExecutorStart_hook;
 }
