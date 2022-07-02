@@ -513,32 +513,39 @@ gatekeeper_oa_hook(ObjectAccessType access,
 static void
 pg_proc_guard_checks(QueryDesc *queryDesc, int eflags)
 {
-    /* check if there is an attempt to modify the pg_proc table 
-    * this should never happen directly in extension installs
-    * or elevated context. Superuser is allowed to modify pg_proc, but
-    * probably doesn't want to be doing this manually.
-    */
+    /* check if there is an attempt to modify the pg_proc table
+     * this should never happen directly in extension installs
+     * or elevated context. Superuser is allowed to modify pg_proc, but
+     * probably doesn't want to be doing this manually.
+     */
     ListCell *resultRelations;
-    switch (queryDesc->operation)
+    RangeTblEntry *rt;
+    
+    /* only check function if security agent is enabled */
+    if (pg_security_agent_enabled)
     {
-    case CMD_INSERT:
-    case CMD_UPDATE:
-        foreach (resultRelations, queryDesc->plannedstmt->rtable)
+        switch (queryDesc->operation)
         {
-            RangeTblEntry *rt = lfirst(resultRelations);
-            if (rt->relid == 1255) // update with lookup for pg_proc oid
+        case CMD_INSERT:
+        case CMD_UPDATE:
+            foreach (resultRelations, queryDesc->plannedstmt->rtable)
             {
-                if (creating_extension || is_elevated() || is_security_restricted())
+                rt = lfirst(resultRelations);
+                if (rt->relid == 1255) // update with lookup for pg_proc oid
                 {
-                    elog(ERROR, "Modifying pg_proc is not allowed in elevated context");
-                    return;
+                    if (creating_extension || is_elevated() || is_security_restricted())
+                    {
+                        elog(ERROR, "Modifying pg_proc is not allowed in elevated context");
+                        return;
+                    }
                 }
             }
+            break;
+        default:
+            break;
         }
-        break;
-    default:
-        break;
     }
+
     if (prev_ExecutorStart_hook)
         prev_ExecutorStart_hook(queryDesc, eflags);
     else
