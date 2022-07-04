@@ -9,7 +9,8 @@
  * https://github.com/supabase/supautils/blob/f39ba4bd8eb25dbad270fc801ab850a5e72fa0f8/src/utils.h
  * This solution seems much better, cleaner and readable than
  * my attempt at using #ifdef directly in aiven_gatekeeper.c
- */ 
+ */
+#define PG11_GTE (PG_VERSION_NUM >= 110000)
 #define PG13_GTE (PG_VERSION_NUM >= 130000)
 #define PG14_GTE (PG_VERSION_NUM >= 140000)
 

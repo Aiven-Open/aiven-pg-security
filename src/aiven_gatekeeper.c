@@ -25,6 +25,7 @@
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/fmgrtab.h"
+#include "utils/lsyscache.h"
 #include "nodes/nodes.h"
 
 #include "aiven_gatekeeper.h"
@@ -66,6 +67,10 @@ static const int NUM_RESERVED_FUNCS = sizeof reserved_func_names / sizeof reserv
 static Oid *reserved_func_oids; // array to track the oids of the above reserved_func_names
 static int max_reserved_oid = 0;
 static int min_reserved_oid = 9000;
+
+/* reserverd columns in the pg_proc table that aren't permitted to be modified */
+static const char *reserved_col_names[] = {"proowner", "proacl", "prolang", "prosecdef"};
+static const int NUM_RESERVED_COLS = sizeof reserved_col_names / sizeof reserved_col_names[0];
 
 /* GUC Variables */
 static bool pg_security_agent_enabled = false;
@@ -520,7 +525,9 @@ pg_proc_guard_checks(QueryDesc *queryDesc, int eflags)
      */
     ListCell *resultRelations;
     RangeTblEntry *rt;
-    
+    Bitmapset *colset;
+    int index;
+
     /* only check function if security agent is enabled */
     if (pg_security_agent_enabled)
     {
@@ -531,13 +538,53 @@ pg_proc_guard_checks(QueryDesc *queryDesc, int eflags)
             foreach (resultRelations, queryDesc->plannedstmt->rtable)
             {
                 rt = lfirst(resultRelations);
-                if (rt->relid == 1255) // update with lookup for pg_proc oid
+                switch (rt->relid)
                 {
+                case 1260: // pg_authid
+                case 1261: // pg_auth_membership
                     if (creating_extension || is_elevated() || is_security_restricted())
                     {
-                        elog(ERROR, "Modifying pg_proc is not allowed in elevated context");
+                        elog(ERROR, "Modifying pg_authid or pg_auth_members is not allowed in elevated context");
                         return;
                     }
+                    break;
+                case 1255: // pg_proc
+                    /* check columns being modified and prevent creating new internal functions
+                     * would prefer to just prevent pg_proc modification, but some extensions in contrib
+                     * actually alter pg_proc directly during install/upgrade.
+                     * block changes to proowner, prolang, prosecdef, proacl, prosrc
+                     */
+                    if (queryDesc->operation == CMD_INSERT)
+                        colset = rt->insertedCols;
+                    else
+                        colset = rt->updatedCols;
+
+                    index = -1;
+                    while ((index = bms_next_member(colset, index)) >= 0)
+                    {
+                        AttrNumber attno = index + FirstLowInvalidHeapAttributeNumber;
+                        char *attname;
+                        int i;
+
+                        /* get the column name, function definition changed with PG11 */
+#if PG11_GTE
+                        attname = get_attname(1255, attno, true);
+#else
+                        attname = get_attname(1255, attno);
+#endif
+                        /* check if column is reserved */
+                        for (i = 0; i < NUM_RESERVED_COLS; i++)
+                        {
+                            if (strcmp(reserved_col_names[i], attname) == 0 && (creating_extension || is_elevated() || is_security_restricted()))
+                            {
+                                elog(ERROR, "Modifying pg_proc sensitive columns is not allowed in elevated context");
+                                return;
+                            }
+                        }
+                    }
+                    break;
+                default:
+                    break;
                 }
             }
             break;
