@@ -27,6 +27,7 @@
 #include "utils/fmgrtab.h"
 #include "utils/lsyscache.h"
 #include "nodes/nodes.h"
+#include "access/sysattr.h"
 
 #include "aiven_gatekeeper.h"
 
