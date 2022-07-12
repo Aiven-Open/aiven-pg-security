@@ -44,9 +44,9 @@ static void gatekeeper_oa_hook(ObjectAccessType access,
                                Oid objectId,
                                int subId,
                                void *arg);
-static void allow_role_stmt(void);
+static char *allow_role_stmt(void);
 static void allow_granted_roles(List *addroleto);
-static void allow_grant_role(Oid role_oid);
+static char *allow_grant_or_alter_role(Oid role_oid);
 static bool allowed_guc_change_check_hook(bool *newval, void **extra, GucSource source);
 
 /* disallow-list of reserved functions we don't want to give access to
@@ -131,17 +131,19 @@ is_security_restricted(void)
     return InSecurityRestrictedOperation();
 }
 
-static void
+static char *
 allow_role_stmt(void)
 {
     if (creating_extension)
-        elog(ERROR, "ROLE modification to SUPERUSER not allowed in extensions");
+        return "ROLE modification to SUPERUSER/privileged role not allowed in extensions";
 
     if (is_security_restricted())
-        elog(ERROR, "ROLE modification to SUPERUSER not allowed in SECURITY_RESTRICTED_OPERATION");
+        return "ROLE modification to SUPERUSER/privileged role not allowed in SECURITY_RESTRICTED_OPERATION";
 
     if (is_elevated())
-        elog(ERROR, "ROLE modification to SUPERUSER not allowed");
+        return "ROLE modification to SUPERUSER/privileged role not allowed";
+
+    return NULL;
 }
 
 static void
@@ -150,20 +152,27 @@ allow_granted_roles(List *addroleto)
     ListCell *role_cell;
     RoleSpec *rolemember;
     Oid role_member_oid;
-
+    char *result;
     // check if any of the roles we are trying to add to have superuser
     foreach (role_cell, addroleto)
     {
         rolemember = lfirst(role_cell);
         role_member_oid = get_rolespec_oid(rolemember, false);
-        if (superuser_arg(role_member_oid))
-            allow_role_stmt();
+        result = allow_grant_or_alter_role(role_member_oid);
+        if (result != NULL)
+        {
+            list_free(addroleto);
+            elog(ERROR, "%s", result);
+        }
     }
+    list_free(addroleto);
 }
-static void
-allow_grant_role(Oid role_oid)
+
+static char *
+allow_grant_or_alter_role(Oid role_oid)
 {
-    /* check we aren't granting superuser or privileged roles
+    /* check if we are trying to alter a reserved (privileged) role, or grant
+     * access to superuser or privileged roles
      * we first need to fetch the oid's of the reserved roles.
      * these would be nice to pull from header files, but the required
      * headers are generated using src/backend/catalog/genbki.pl and aren't guaranteed to exist.
@@ -180,7 +189,10 @@ allow_grant_role(Oid role_oid)
         is_member_of_role(role_oid, role_pg_execute_server_program) ||
         is_member_of_role(role_oid, role_pg_read_server_files) ||
         is_member_of_role(role_oid, role_pg_write_server_files))
-        allow_role_stmt();
+    {
+        return allow_role_stmt();
+    }
+    return NULL;
 }
 
 static void
@@ -203,6 +215,7 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
     int i;
     bool checkBody;
     char *sqlBody;
+    char *result;
 
     /* if the agent is disabled, skip all checks */
     if (!pg_security_agent_enabled)
@@ -226,15 +239,23 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
     {
     case T_AlterRoleStmt: // ALTER ROLE
         alterRoleStmt = (AlterRoleStmt *)stmt;
-        // check if we are altering with superuser
 
+        // check we aren't altering a reserved role (existing superuser)
+        roleoid = get_role_oid(alterRoleStmt->role->rolename, true);
+        result = allow_grant_or_alter_role(roleoid);
+        if (result != NULL)
+            elog(ERROR, "%s", result);
+
+        // check if we are altering with superuser
         foreach (option, alterRoleStmt->options)
         {
             defel = (DefElem *)lfirst(option);
             // superuser or nosuperuser is supplied (both are treated as defname superuser) and check that the arg is set to true
-            if (strcmp(defel->defname, "superuser") == 0 && defGetBoolean(defel))
+            if (strncmp(defel->defname, "superuser", 10) == 0 && defGetBoolean(defel))
             {
-                allow_role_stmt();
+                result = allow_role_stmt();
+                if (result != NULL)
+                    elog(ERROR, "%s", result);
             }
         }
         break;
@@ -246,11 +267,15 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
             defel = (DefElem *)lfirst(option);
 
             // check if we are granting superuser
-            if (strcmp(defel->defname, "superuser") == 0 && defGetBoolean(defel))
-                allow_role_stmt();
+            if (strncmp(defel->defname, "superuser", 10) == 0 && defGetBoolean(defel))
+            {
+                result = allow_role_stmt();
+                if (result != NULL)
+                    elog(ERROR, "%s", result);
+            }
 
-            // check if user is being added to a role that has superuser
-            if (strcmp(defel->defname, "addroleto") == 0)
+            // check if user is being added to a role that has superuser or other high privilege
+            if (strncmp(defel->defname, "addroleto", 10) == 0)
             {
                 addroleto = (List *)defel->arg;
                 allow_granted_roles(addroleto);
@@ -270,7 +295,9 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
         {
             priv = (AccessPriv *)lfirst(grantRoleCell);
             roleoid = get_role_oid(priv->priv_name, false);
-            allow_grant_role(roleoid);
+            result = allow_grant_or_alter_role(roleoid);
+            if (result != NULL)
+                elog(ERROR, "%s", result);
         }
         break;
     case T_CopyStmt: // COPY
@@ -326,12 +353,12 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
             /* check if of language type internal
              * this is not accessible to untrusted users, so disable if elevated context
              */
-            if (strcmp(defel->defname, "language") == 0)
+            if (strncmp(defel->defname, "language", 9) == 0)
             {
                 funcLang = defGetString(defel);
                 /* check if restricted language type */
-                if (strcmp(funcLang, "plperlu") == 0 ||
-                    strcmp(funcLang, "plpythonu") == 0)
+                if (strncmp(funcLang, "plperlu", 8) == 0 ||
+                    strncmp(funcLang, "plpythonu", 10) == 0)
                 {
                     if (creating_extension)
                     {
@@ -349,7 +376,7 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
                         return;
                     }
                 }
-                else if (strcmp(funcLang, "internal") == 0 && (creating_extension || is_elevated() || is_security_restricted()))
+                else if (strncmp(funcLang, "internal", 9) == 0 && (creating_extension || is_elevated() || is_security_restricted()))
                 {
                     checkBody = true;
                 }
@@ -357,7 +384,7 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
             /* extract the sql body so we can use it to check if restricted internal
              * function is being declared
              */
-            if (strcmp(defel->defname, "as") == 0)
+            if (strncmp(defel->defname, "as", 3) == 0)
             {
                 sqlBody = defGetString(defel);
             }
@@ -368,7 +395,7 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
             for (i = 0; i < NUM_RESERVED_FUNCS; i++)
             {
                 /* internal names are case sensitive, so strcmp is fine here */
-                if (strcmp(reserved_func_names[i], sqlBody) == 0)
+                if (strncmp(reserved_func_names[i], sqlBody, 28) == 0)
                 {
                     elog(ERROR, "using builtin function %s is not allowed", sqlBody);
                     return;
@@ -379,7 +406,7 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
     case T_CreateExtensionStmt:
         /* block file_fdw extension. Case sensitive compare is ok, since the extension name is lower case when read from extname*/
         createExtStmt = (CreateExtensionStmt *)stmt;
-        if (strcmp(createExtStmt->extname, "file_fdw") == 0)
+        if (strncmp(createExtStmt->extname, "file_fdw", 9) == 0)
         {
             elog(ERROR, "file_fdw extension not allowed");
             return;
@@ -576,7 +603,7 @@ pg_proc_guard_checks(QueryDesc *queryDesc, int eflags)
                         /* check if column is reserved */
                         for (i = 0; i < NUM_RESERVED_COLS; i++)
                         {
-                            if (strcmp(reserved_col_names[i], attname) == 0 && (creating_extension || is_elevated() || is_security_restricted()))
+                            if (strncmp(reserved_col_names[i], attname, 10) == 0 && (creating_extension || is_elevated() || is_security_restricted()))
                             {
                                 elog(ERROR, "Modifying pg_proc sensitive columns is not allowed in elevated context");
                                 return;
@@ -636,6 +663,10 @@ void _PG_init(void)
  */
 void _PG_fini(void)
 {
+    /* free malloc(s) */
+    if (reserved_func_oids != NULL)
+        free(reserved_func_oids);
+
     /* Uninstall hooks. */
     ProcessUtility_hook = prev_ProcessUtility;
     object_access_hook = next_object_access_hook;
