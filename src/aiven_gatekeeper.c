@@ -434,13 +434,14 @@ fmgr_lookupByName(const char *name)
 
     for (i = 0; i < fmgr_nbuiltins; i++)
     {
-        if (strcmp(name, fmgr_builtins[i].funcName) == 0)
+        // switched to strncmp, 28 is the current max size that can be expected for name, as from reserved_func_names
+        if (strncmp(name, fmgr_builtins[i].funcName, 28) == 0)
             return fmgr_builtins + i;
     }
     return NULL;
 }
 
-static void
+static bool
 set_reserved_oids()
 {
     /* sets the min and max_reserved_oid variables, allowing for skipping builtins search
@@ -450,7 +451,10 @@ set_reserved_oids()
     int i;
 
     reserved_func_oids = (Oid *)malloc(NUM_RESERVED_FUNCS * sizeof(Oid));
-
+    if (reserved_func_oids == NULL)
+    {
+        return false;
+    }
     /* loop through the function names we have defined as reserved
      * lookup the oid of the function so that we can use this for future
      * evaluations rather than comparing strings
@@ -471,6 +475,7 @@ set_reserved_oids()
             }
         }
     }
+    return true;
 }
 
 /* hook to check if the function being called is not in the disallowed-list
@@ -645,17 +650,22 @@ void _PG_init(void)
                              NULL,
                              NULL);
 
-    set_reserved_oids();
+    if (set_reserved_oids())
+    {
+        /* Install Hooks */
+        prev_ProcessUtility = ProcessUtility_hook;
+        ProcessUtility_hook = gatekeeper_checks;
 
-    /* Install Hooks */
-    prev_ProcessUtility = ProcessUtility_hook;
-    ProcessUtility_hook = gatekeeper_checks;
+        next_object_access_hook = object_access_hook;
+        object_access_hook = gatekeeper_oa_hook;
 
-    next_object_access_hook = object_access_hook;
-    object_access_hook = gatekeeper_oa_hook;
-
-    prev_ExecutorStart_hook = ExecutorStart_hook;
-    ExecutorStart_hook = pg_proc_guard_checks;
+        prev_ExecutorStart_hook = ExecutorStart_hook;
+        ExecutorStart_hook = pg_proc_guard_checks;
+    }
+    else
+    {
+        elog(ERROR, "Failed to initialise aiven gatekeeper.");
+    }
 }
 
 /*
