@@ -15,6 +15,8 @@
 #include "catalog/objectaccess.h"
 #include "commands/extension.h"
 #include "commands/defrem.h"
+#include "commands/explain.h"
+#include "executor/instrument.h"
 #include "nodes/value.h"
 #include "fmgr.h"
 #include "miscadmin.h"
@@ -23,7 +25,9 @@
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/fmgrtab.h"
+#include "utils/lsyscache.h"
 #include "nodes/nodes.h"
+#include "access/sysattr.h"
 
 #include "aiven_gatekeeper.h"
 
@@ -40,9 +44,9 @@ static void gatekeeper_oa_hook(ObjectAccessType access,
                                Oid objectId,
                                int subId,
                                void *arg);
-static void allow_role_stmt(void);
+static char *allow_role_stmt(void);
 static void allow_granted_roles(List *addroleto);
-static void allow_grant_role(Oid role_oid);
+static char *allow_grant_or_alter_role(Oid role_oid);
 static bool allowed_guc_change_check_hook(bool *newval, void **extra, GucSource source);
 
 /* disallow-list of reserved functions we don't want to give access to
@@ -65,12 +69,17 @@ static Oid *reserved_func_oids; // array to track the oids of the above reserved
 static int max_reserved_oid = 0;
 static int min_reserved_oid = 9000;
 
+/* reserverd columns in the pg_proc table that aren't permitted to be modified */
+static const char *reserved_col_names[] = {"proowner", "proacl", "prolang", "prosecdef"};
+static const int NUM_RESERVED_COLS = sizeof reserved_col_names / sizeof reserved_col_names[0];
+
 /* GUC Variables */
 static bool pg_security_agent_enabled = false;
 
 /* Saved hook values in case of unload */
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 static object_access_hook_type next_object_access_hook = NULL;
+static ExecutorStart_hook_type prev_ExecutorStart_hook = NULL;
 
 static bool
 allowed_guc_change_check_hook(bool *newval, void **extra, GucSource source)
@@ -122,17 +131,19 @@ is_security_restricted(void)
     return InSecurityRestrictedOperation();
 }
 
-static void
+static char *
 allow_role_stmt(void)
 {
     if (creating_extension)
-        elog(ERROR, "ROLE modification to SUPERUSER not allowed in extensions");
+        return "ROLE modification to SUPERUSER/privileged role not allowed in extensions";
 
     if (is_security_restricted())
-        elog(ERROR, "ROLE modification to SUPERUSER not allowed in SECURITY_RESTRICTED_OPERATION");
+        return "ROLE modification to SUPERUSER/privileged role not allowed in SECURITY_RESTRICTED_OPERATION";
 
     if (is_elevated())
-        elog(ERROR, "ROLE modification to SUPERUSER not allowed");
+        return "ROLE modification to SUPERUSER/privileged role not allowed";
+
+    return NULL;
 }
 
 static void
@@ -141,20 +152,27 @@ allow_granted_roles(List *addroleto)
     ListCell *role_cell;
     RoleSpec *rolemember;
     Oid role_member_oid;
-
+    char *result;
     // check if any of the roles we are trying to add to have superuser
     foreach (role_cell, addroleto)
     {
         rolemember = lfirst(role_cell);
         role_member_oid = get_rolespec_oid(rolemember, false);
-        if (superuser_arg(role_member_oid))
-            allow_role_stmt();
+        result = allow_grant_or_alter_role(role_member_oid);
+        if (result != NULL)
+        {
+            list_free(addroleto);
+            elog(ERROR, "%s", result);
+        }
     }
+    list_free(addroleto);
 }
-static void
-allow_grant_role(Oid role_oid)
+
+static char *
+allow_grant_or_alter_role(Oid role_oid)
 {
-    /* check we aren't granting superuser or privileged roles
+    /* check if we are trying to alter a reserved (privileged) role, or grant
+     * access to superuser or privileged roles
      * we first need to fetch the oid's of the reserved roles.
      * these would be nice to pull from header files, but the required
      * headers are generated using src/backend/catalog/genbki.pl and aren't guaranteed to exist.
@@ -171,7 +189,10 @@ allow_grant_role(Oid role_oid)
         is_member_of_role(role_oid, role_pg_execute_server_program) ||
         is_member_of_role(role_oid, role_pg_read_server_files) ||
         is_member_of_role(role_oid, role_pg_write_server_files))
-        allow_role_stmt();
+    {
+        return allow_role_stmt();
+    }
+    return NULL;
 }
 
 static void
@@ -182,12 +203,19 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
     CreateRoleStmt *createRoleStmt;
     AlterRoleStmt *alterRoleStmt;
     GrantRoleStmt *grantRoleStmt;
+    CreateFunctionStmt *createFuncStmt;
+    CreateExtensionStmt *createExtStmt;
     ListCell *option;
     DefElem *defel;
     List *addroleto;
     ListCell *grantRoleCell;
     AccessPriv *priv;
     Oid roleoid;
+    char *funcLang;
+    int i;
+    bool checkBody;
+    char *sqlBody;
+    char *result;
 
     /* if the agent is disabled, skip all checks */
     if (!pg_security_agent_enabled)
@@ -211,15 +239,23 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
     {
     case T_AlterRoleStmt: // ALTER ROLE
         alterRoleStmt = (AlterRoleStmt *)stmt;
-        // check if we are altering with superuser
 
+        // check we aren't altering a reserved role (existing superuser)
+        roleoid = get_role_oid(alterRoleStmt->role->rolename, true);
+        result = allow_grant_or_alter_role(roleoid);
+        if (result != NULL)
+            elog(ERROR, "%s", result);
+
+        // check if we are altering with superuser
         foreach (option, alterRoleStmt->options)
         {
             defel = (DefElem *)lfirst(option);
             // superuser or nosuperuser is supplied (both are treated as defname superuser) and check that the arg is set to true
-            if (strcmp(defel->defname, "superuser") == 0 && defGetBoolean(defel))
+            if (strncmp(defel->defname, "superuser", 10) == 0 && defGetBoolean(defel))
             {
-                allow_role_stmt();
+                result = allow_role_stmt();
+                if (result != NULL)
+                    elog(ERROR, "%s", result);
             }
         }
         break;
@@ -231,11 +267,15 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
             defel = (DefElem *)lfirst(option);
 
             // check if we are granting superuser
-            if (strcmp(defel->defname, "superuser") == 0 && defGetBoolean(defel))
-                allow_role_stmt();
+            if (strncmp(defel->defname, "superuser", 10) == 0 && defGetBoolean(defel))
+            {
+                result = allow_role_stmt();
+                if (result != NULL)
+                    elog(ERROR, "%s", result);
+            }
 
-            // check if user is being added to a role that has superuser
-            if (strcmp(defel->defname, "addroleto") == 0)
+            // check if user is being added to a role that has superuser or other high privilege
+            if (strncmp(defel->defname, "addroleto", 10) == 0)
             {
                 addroleto = (List *)defel->arg;
                 allow_granted_roles(addroleto);
@@ -255,7 +295,9 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
         {
             priv = (AccessPriv *)lfirst(grantRoleCell);
             roleoid = get_role_oid(priv->priv_name, false);
-            allow_grant_role(roleoid);
+            result = allow_grant_or_alter_role(roleoid);
+            if (result != NULL)
+                elog(ERROR, "%s", result);
         }
         break;
     case T_CopyStmt: // COPY
@@ -300,6 +342,76 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
          * so don't do anything.
          */
         break;
+    case T_CreateFunctionStmt:
+        createFuncStmt = (CreateFunctionStmt *)stmt;
+        checkBody = false; // used for versions prior to 14, where the sql_body is not availble in the CreateFuncStmt struct
+
+        foreach (option, createFuncStmt->options)
+        {
+            defel = (DefElem *)lfirst(option);
+
+            /* check if of language type internal
+             * this is not accessible to untrusted users, so disable if elevated context
+             */
+            if (strncmp(defel->defname, "language", 9) == 0)
+            {
+                funcLang = defGetString(defel);
+                /* check if restricted language type */
+                if (strncmp(funcLang, "plperlu", 8) == 0 ||
+                    strncmp(funcLang, "plpythonu", 10) == 0)
+                {
+                    if (creating_extension)
+                    {
+                        elog(ERROR, "LANGUAGE %s not allowed in extensions", funcLang);
+                        return;
+                    }
+                    if (is_security_restricted())
+                    {
+                        elog(ERROR, "LANGUAGE %s not allowed in SECURITY_RESTRICTED_OPERATION", funcLang);
+                        return;
+                    }
+                    if (is_elevated())
+                    {
+                        elog(ERROR, "LANGUAGE %s not allowed", funcLang);
+                        return;
+                    }
+                }
+                else if (strncmp(funcLang, "internal", 9) == 0 && (creating_extension || is_elevated() || is_security_restricted()))
+                {
+                    checkBody = true;
+                }
+            }
+            /* extract the sql body so we can use it to check if restricted internal
+             * function is being declared
+             */
+            if (strncmp(defel->defname, "as", 3) == 0)
+            {
+                sqlBody = defGetString(defel);
+            }
+        }
+        /* we need to check the sql body, as we are in restricted context and the function is of type internal*/
+        if (checkBody == true)
+        {
+            for (i = 0; i < NUM_RESERVED_FUNCS; i++)
+            {
+                /* internal names are case sensitive, so strcmp is fine here */
+                if (strncmp(reserved_func_names[i], sqlBody, 28) == 0)
+                {
+                    elog(ERROR, "using builtin function %s is not allowed", sqlBody);
+                    return;
+                }
+            }
+        }
+        break;
+    case T_CreateExtensionStmt:
+        /* block file_fdw extension. Case sensitive compare is ok, since the extension name is lower case when read from extname*/
+        createExtStmt = (CreateExtensionStmt *)stmt;
+        if (strncmp(createExtStmt->extname, "file_fdw", 9) == 0)
+        {
+            elog(ERROR, "file_fdw extension not allowed");
+            return;
+        }
+        break;
     default:
         break;
     }
@@ -322,13 +434,14 @@ fmgr_lookupByName(const char *name)
 
     for (i = 0; i < fmgr_nbuiltins; i++)
     {
-        if (strcmp(name, fmgr_builtins[i].funcName) == 0)
+        // switched to strncmp, 28 is the current max size that can be expected for name, as from reserved_func_names
+        if (strncmp(name, fmgr_builtins[i].funcName, 28) == 0)
             return fmgr_builtins + i;
     }
     return NULL;
 }
 
-static void
+static bool
 set_reserved_oids()
 {
     /* sets the min and max_reserved_oid variables, allowing for skipping builtins search
@@ -338,7 +451,10 @@ set_reserved_oids()
     int i;
 
     reserved_func_oids = (Oid *)malloc(NUM_RESERVED_FUNCS * sizeof(Oid));
-
+    if (reserved_func_oids == NULL)
+    {
+        return false;
+    }
     /* loop through the function names we have defined as reserved
      * lookup the oid of the function so that we can use this for future
      * evaluations rather than comparing strings
@@ -359,6 +475,7 @@ set_reserved_oids()
             }
         }
     }
+    return true;
 }
 
 /* hook to check if the function being called is not in the disallowed-list
@@ -431,6 +548,89 @@ gatekeeper_oa_hook(ObjectAccessType access,
         (*next_object_access_hook)(access, classId, objectId, subId, arg);
 }
 
+static void
+pg_proc_guard_checks(QueryDesc *queryDesc, int eflags)
+{
+    /* check if there is an attempt to modify the pg_proc table
+     * this should never happen directly in extension installs
+     * or elevated context. Superuser is allowed to modify pg_proc, but
+     * probably doesn't want to be doing this manually.
+     */
+    ListCell *resultRelations;
+    RangeTblEntry *rt;
+    Bitmapset *colset;
+    int index;
+
+    /* only check function if security agent is enabled */
+    if (pg_security_agent_enabled)
+    {
+        switch (queryDesc->operation)
+        {
+        case CMD_INSERT:
+        case CMD_UPDATE:
+            foreach (resultRelations, queryDesc->plannedstmt->rtable)
+            {
+                rt = lfirst(resultRelations);
+                switch (rt->relid)
+                {
+                case 1260: // pg_authid
+                case 1261: // pg_auth_membership
+                    if (creating_extension || is_elevated() || is_security_restricted())
+                    {
+                        elog(ERROR, "Modifying pg_authid or pg_auth_members is not allowed in elevated context");
+                        return;
+                    }
+                    break;
+                case 1255: // pg_proc
+                    /* check columns being modified and prevent creating new internal functions
+                     * would prefer to just prevent pg_proc modification, but some extensions in contrib
+                     * actually alter pg_proc directly during install/upgrade.
+                     * block changes to proowner, prolang, prosecdef, proacl, prosrc
+                     */
+                    if (queryDesc->operation == CMD_INSERT)
+                        colset = rt->insertedCols;
+                    else
+                        colset = rt->updatedCols;
+
+                    index = -1;
+                    while ((index = bms_next_member(colset, index)) >= 0)
+                    {
+                        AttrNumber attno = index + FirstLowInvalidHeapAttributeNumber;
+                        char *attname;
+                        int i;
+
+                        /* get the column name, function definition changed with PG11 */
+#if PG11_GTE
+                        attname = get_attname(1255, attno, true);
+#else
+                        attname = get_attname(1255, attno);
+#endif
+                        /* check if column is reserved */
+                        for (i = 0; i < NUM_RESERVED_COLS; i++)
+                        {
+                            if (strncmp(reserved_col_names[i], attname, 10) == 0 && (creating_extension || is_elevated() || is_security_restricted()))
+                            {
+                                elog(ERROR, "Modifying pg_proc sensitive columns is not allowed in elevated context");
+                                return;
+                            }
+                        }
+                    }
+                    break;
+                default:
+                    break;
+                }
+            }
+            break;
+        default:
+            break;
+        }
+    }
+
+    if (prev_ExecutorStart_hook)
+        prev_ExecutorStart_hook(queryDesc, eflags);
+    else
+        standard_ExecutorStart(queryDesc, eflags);
+}
 /*
  * Module Load Callback
  */
@@ -450,14 +650,22 @@ void _PG_init(void)
                              NULL,
                              NULL);
 
-    set_reserved_oids();
+    if (set_reserved_oids())
+    {
+        /* Install Hooks */
+        prev_ProcessUtility = ProcessUtility_hook;
+        ProcessUtility_hook = gatekeeper_checks;
 
-    /* Install Hooks */
-    prev_ProcessUtility = ProcessUtility_hook;
-    ProcessUtility_hook = gatekeeper_checks;
+        next_object_access_hook = object_access_hook;
+        object_access_hook = gatekeeper_oa_hook;
 
-    next_object_access_hook = object_access_hook;
-    object_access_hook = gatekeeper_oa_hook;
+        prev_ExecutorStart_hook = ExecutorStart_hook;
+        ExecutorStart_hook = pg_proc_guard_checks;
+    }
+    else
+    {
+        elog(ERROR, "Failed to initialise aiven gatekeeper.");
+    }
 }
 
 /*
@@ -465,7 +673,12 @@ void _PG_init(void)
  */
 void _PG_fini(void)
 {
+    /* free malloc(s) */
+    if (reserved_func_oids != NULL)
+        free(reserved_func_oids);
+
     /* Uninstall hooks. */
     ProcessUtility_hook = prev_ProcessUtility;
     object_access_hook = next_object_access_hook;
+    ExecutorStart_hook = prev_ExecutorStart_hook;
 }
