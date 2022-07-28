@@ -1,12 +1,8 @@
 # About
 
-The Aiven Security Agent for Postgresql (aiven-gatekeeper) allows controlling which functions are exposed and prevents common privilege escalation attacks.
+The Aiven Security Agent for Postgresql (aiven-gatekeeper) allows controlling which privileged functions are exposed and prevents their abuse in common privilege escalation attacks.
 
-Aiven provides Postgresql as a Database as a Service (DBaaS). As part of the service offering and hardening of the service, customers are given a privileged user (avnadmin) however the superuser privilege is not given to this user. Superuser access provides the ability to reconfigure the database, something we don't want from a manageability stand-point, and also provides access to functions that allow interaction with the underlying host. Even though all instances are run as single tenant and single host, with additional host hardening applied, providing direct filesystem/host access is not desired.
-
-## Common Privilege Escalation Attacks in Postgresql
-
-Aiven allows customers to use a predefined list of extensions. By default, users require the superuser privilege to create extensions in Postgresql. This poses a problem since the superuser privilege isn't given to customers. To get around this, the pgextwlist extension is used to allow creation of extensions from a lower privileged user. The extension is created using the default superuser, postgres, which now exposes Aiven to the risk of privilege escalation attacks. Should an extension installation script be written in an insecure manner (a very common occurrence), it is possible for users to gain superuser privileges.
+Aiven provides Postgresql as a Database as a Service (DBaaS). As part of the service offering, customers are given a privileged user (avnadmin), however the superuser privilege is not given to this user. Superuser access allows bypassing all permission checks, and provides the ability to reconfigure the database, something we don't want from a manageability stand-point. Superuser also provides access to functions that allow interaction, reading files and executing programs, on the underlying host. A database is useful, but can be made even more useful through extensions. Postgresql supports a plethora of useful extensions and we in turn want to ensure our customers can use those extensions. Unfortunately, due to the design of Postgresql, most extensions require elevated (superuser) permissions to be installed. This creates a security conundrum, how to allow customers to install extensions without superuser access?
 
 ## How the agent works
 The agent is loaded as a shared library at Postgresql server startup and uses a number of hooking functions to intercept and inspect utility and function calls. A security decision can be made by examining the current execution state and determining if a privileged action should be allowed or not.
@@ -15,7 +11,7 @@ The agent uses the following three criteria for making a risk assessment before 
 
 **creating_extension**
 
-The function is executing during the `CREATE EXTENSION` function.
+The function is executing during the `CREATE EXTENSION` transaction.
 
 **is_elevated**
 
@@ -45,7 +41,7 @@ Prevents granting the privileged permissions
 
 ### File read/write
 
-`COPY TO/FROM FILE` - This functionality is normally reserved for the superuser or roles with the `pg_read_server_files` or `pg_write_server_files` permission. This is blocked during an elevated context. 
+`COPY TO/FROM FILE` - This functionality is normally reserved for the superuser or roles with the `pg_read_server_files` or `pg_write_server_files` permission. This is blocked during an elevated context.
 
 
 ## object_access_hook
@@ -56,8 +52,13 @@ The hook monitors a predefined list of builtin functions and does not interfere 
 
 * pg_read_file
 * pg_read_binary_file
+* pg_reload_conf
 * lo_import
 * lo_export
+
+## System tables
+
+The agent prevents modification to some system tables, namely `pg_proc` and `pg_authid`. This helps prevent modifications that could bypass the other protections offered by the agent.
 
 ## Agent Configuration
 
