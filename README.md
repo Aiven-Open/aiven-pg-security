@@ -34,7 +34,7 @@ shared_preload_libraries = 'aiven_gatekeeper'
 
 License
 ============
-Aiven PostgreSQL Security is licensed under the Apache license, version 2.0. Full license text is available in the [LICENSE](LICENSE) file.
+Aiven PostgreSQL Security is licensed under the PostgreSQL license. Full license text is available in the [LICENSE](LICENSE) file.
 
 Please note that the project explicitly does not require a CLA (Contributor License Agreement) from its contributors.
 
