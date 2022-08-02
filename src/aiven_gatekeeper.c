@@ -669,8 +669,8 @@ void _PG_init(void)
                              "Toggle the agent into strict mode. Reserved actions are blocked regardless of context",
                              NULL,
                              &pg_security_agent_strict,
-                             false,               // default to 'off'
-                             PGC_SIGHUP,         // only superusers can set, or at postmaster startup
+                             false,              // default to 'off'
+                             PGC_POSTMASTER,     // only at postmaster startup
                              GUC_SUPERUSER_ONLY, // only show to superuser
                              allowed_guc_change_check_hook,
                              NULL,
