@@ -12,6 +12,14 @@ Prevents common privilege escalation attacks, primarily at the time of extension
 
 For detailed features and how they work, visit the [documentation](docs/).
 
+Security
+===========
+An independent, external code audit was performed and the results are available in the [docs](docs/) directory:
+* [Report letter](docs/20220805%20Aiven%20Customer%20Letter.pdf)
+* [Final report](docs/20220805%20Aiven%20Oy%20-%20Aiven%20Source%20Code%20Audit%20Retest%20Final%20Report.pdf)
+
+To report any possible vulnerabilities or other serious issues please see our [security](SECURITY.md) policy.
+
 Setup
 ============
 
