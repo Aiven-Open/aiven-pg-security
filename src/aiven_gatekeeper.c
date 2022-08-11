@@ -93,7 +93,7 @@ allowed_guc_change_check_hook(bool *newval, void **extra, GucSource source)
      * We should be safe-ish anyway, as ALTER SYSTEM can't be executed from a function. But
      * doesn't hurt to be careful.
      */
-    return !(creating_extension || is_security_restricted() || is_elevated());
+    return !(pg_security_agent_strict || creating_extension || is_security_restricted() || is_elevated());
 }
 /* returns true if the session and current user ids are different */
 static bool
