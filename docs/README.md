@@ -66,3 +66,10 @@ The agent is enabled by default on Aiven PostgreSQL services. The agent can be t
 To disable the agent, set `aiven.pg_security_agent = off` in the __postgresql.conf__ and send the `SIGHUP` signal to the postgresql service. You can also restart the service, or as a superuser execute the SQL function `SELECT pg_config_reload()`.
 
 Alternatively execute `ALTER SYSTEM SET aiven.pg_security_agent TO off;` as a superuser and then execute `SELECT pg_config_reload();` to force the reloading of the __postgresql.conf__ configuration.
+
+
+## Strict mode
+
+The agent can be set to strict mode, where the usual checks apply in all context. This means actions that are normally only blocked in "elevated contexts" will also be blocked for any superuser session.
+
+To enable strict mode, set `aiven.pg_security_agent_strict = on` in __postgresql.conf__. Once set, postmaster needs to be restarted. With strict mode enabled, it is not possible for the superuser to disable the agent via a `pg_config_reload`. If `ALTER SYSTEM SET aiven.pg_security_agent_strict TO on;` was used to enable strict mode, the setting needs to be changed or removed from __postgresql.auto.conf__ before restarting postmaster (the setting in .auto. will override that in __postgresql.conf__).
