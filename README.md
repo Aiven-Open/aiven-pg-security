@@ -2,7 +2,7 @@ Aiven PG Security Utility
 ======================
 Adds utility functions to harden PostgreSQL® through shared libraries and hooks.
 
-See your blog post about aiven-gatekeeper and PostgreSQL extension security: [Aiven's Blog](https://aiven.io/blog/aiven-security-agent-for-postgresql).
+See our blog post about aiven-gatekeeper and PostgreSQL extension security: [Aiven's Blog](https://aiven.io/blog/aiven-security-agent-for-postgresql).
 
 Overview
 ========
