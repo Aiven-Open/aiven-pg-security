@@ -75,6 +75,7 @@ static const int NUM_RESERVED_COLS = sizeof reserved_col_names / sizeof reserved
 
 /* GUC Variables */
 static bool pg_security_agent_enabled = false;
+static bool pg_security_agent_strict = false;
 
 /* Saved hook values in case of unload */
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
@@ -92,7 +93,7 @@ allowed_guc_change_check_hook(bool *newval, void **extra, GucSource source)
      * We should be safe-ish anyway, as ALTER SYSTEM can't be executed from a function. But
      * doesn't hurt to be careful.
      */
-    return !(creating_extension || is_security_restricted() || is_elevated());
+    return !(pg_security_agent_strict || creating_extension || is_security_restricted() || is_elevated());
 }
 /* returns true if the session and current user ids are different */
 static bool
@@ -134,6 +135,9 @@ is_security_restricted(void)
 static char *
 allow_role_stmt(void)
 {
+    if (pg_security_agent_strict)
+        return "ROLE modification to SUPERUSER/privileged role not allowed";
+
     if (creating_extension)
         return "ROLE modification to SUPERUSER/privileged role not allowed in extensions";
 
@@ -318,6 +322,11 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
          */
         if (copyStmt->filename)
         {
+            if (pg_security_agent_strict)
+            {
+                elog(ERROR, "COPY TO/FROM FILE not allowed");
+                return;
+            }
             if (creating_extension)
             {
                 elog(ERROR, "COPY TO/FROM FILE not allowed in extensions");
@@ -360,6 +369,11 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
                 if (strncmp(funcLang, "plperlu", 8) == 0 ||
                     strncmp(funcLang, "plpythonu", 10) == 0)
                 {
+                    if (pg_security_agent_strict)
+                    {
+                        elog(ERROR, "LANGUAGE %s not allowed", funcLang);
+                        return;
+                    }
                     if (creating_extension)
                     {
                         elog(ERROR, "LANGUAGE %s not allowed in extensions", funcLang);
@@ -376,7 +390,7 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
                         return;
                     }
                 }
-                else if (strncmp(funcLang, "internal", 9) == 0 && (creating_extension || is_elevated() || is_security_restricted()))
+                else if (strncmp(funcLang, "internal", 9) == 0 && (pg_security_agent_strict || creating_extension || is_elevated() || is_security_restricted()))
                 {
                     checkBody = true;
                 }
@@ -511,7 +525,7 @@ gatekeeper_oa_hook(ObjectAccessType access,
                     if (reserved_func_oids[i] == objectId)
                     {
                         /* check if we are in a privileged context and disallow the function executions */
-                        if (creating_extension || is_elevated() || is_security_restricted())
+                        if (pg_security_agent_strict || creating_extension || is_elevated() || is_security_restricted())
                         {
                             /* get the function information so that error message can be more friendly */
                             if ((builtin = fmgr_lookupByName(reserved_func_names[i])) != NULL)
@@ -575,7 +589,7 @@ pg_proc_guard_checks(QueryDesc *queryDesc, int eflags)
                 {
                 case 1260: // pg_authid
                 case 1261: // pg_auth_membership
-                    if (creating_extension || is_elevated() || is_security_restricted())
+                    if (pg_security_agent_strict || creating_extension || is_elevated() || is_security_restricted())
                     {
                         elog(ERROR, "Modifying pg_authid or pg_auth_members is not allowed in elevated context");
                         return;
@@ -608,7 +622,7 @@ pg_proc_guard_checks(QueryDesc *queryDesc, int eflags)
                         /* check if column is reserved */
                         for (i = 0; i < NUM_RESERVED_COLS; i++)
                         {
-                            if (strncmp(reserved_col_names[i], attname, 10) == 0 && (creating_extension || is_elevated() || is_security_restricted()))
+                            if (strncmp(reserved_col_names[i], attname, 10) == 0 && (pg_security_agent_strict || creating_extension || is_elevated() || is_security_restricted()))
                             {
                                 elog(ERROR, "Modifying pg_proc sensitive columns is not allowed in elevated context");
                                 return;
@@ -645,6 +659,18 @@ void _PG_init(void)
                              &pg_security_agent_enabled,
                              true,               // default to 'on'
                              PGC_SIGHUP,         // only superusers can set, or at postmaster startup
+                             GUC_SUPERUSER_ONLY, // only show to superuser
+                             allowed_guc_change_check_hook,
+                             NULL,
+                             NULL);
+
+    // allow toggling of the security agent
+    DefineCustomBoolVariable("aiven.pg_security_agent_strict",
+                             "Toggle the agent into strict mode. Reserved actions are blocked regardless of context",
+                             NULL,
+                             &pg_security_agent_strict,
+                             false,              // default to 'off'
+                             PGC_POSTMASTER,     // only at postmaster startup
                              GUC_SUPERUSER_ONLY, // only show to superuser
                              allowed_guc_change_check_hook,
                              NULL,
