@@ -73,6 +73,10 @@ static int min_reserved_oid = 9000;
 static const char *reserved_col_names[] = {"proowner", "proacl", "prolang", "prosecdef"};
 static const int NUM_RESERVED_COLS = sizeof reserved_col_names / sizeof reserved_col_names[0];
 
+/* reserved columns in the pg_authid table that aren't permitted to be read */
+static const char *reserved_auth_col_names[] = {"rolpassword"};
+static const int NUM_RESERVED_AUTH_COLS = sizeof reserved_auth_col_names / sizeof reserved_auth_col_names[0];
+
 /* GUC Variables */
 static bool pg_security_agent_enabled = false;
 static bool pg_security_agent_strict = false;
@@ -580,8 +584,46 @@ pg_proc_guard_checks(QueryDesc *queryDesc, int eflags)
     {
         switch (queryDesc->operation)
         {
+        case CMD_SELECT:
+            foreach (resultRelations, queryDesc->plannedstmt->rtable)
+            {
+                rt = lfirst(resultRelations);
+                switch (rt->relid)
+                {
+                case 1260: // pg_authid
+                    colset = rt->selectedCols;
+                    index = -1;
+                    while ((index = bms_next_member(colset, index)) >= 0)
+                    {
+                        AttrNumber attno = index + FirstLowInvalidHeapAttributeNumber;
+                        char *attname;
+                        int i;
+
+                        /* get the column name, function definition changed with PG11 */
+#if PG11_GTE
+                        attname = get_attname(1260, attno, true);
+#else
+                        attname = get_attname(1260, attno);
+#endif
+                        /* check if column is reserved */
+                        for (i = 0; i < NUM_RESERVED_AUTH_COLS; i++)
+                        {
+                            if (strncmp(reserved_auth_col_names[i], attname, 10) == 0 && (pg_security_agent_strict || creating_extension || is_elevated() || is_security_restricted()))
+                            {
+                                elog(ERROR, "Reading pg_authid sensitive columns is not allowed in elevated context");
+                                return;
+                            }
+                        }
+                    }
+                    break;
+                default:
+                    break;
+                }
+            }
+            break;
         case CMD_INSERT:
         case CMD_UPDATE:
+        case CMD_DELETE:
             foreach (resultRelations, queryDesc->plannedstmt->rtable)
             {
                 rt = lfirst(resultRelations);
