@@ -16,7 +16,7 @@ jobs:
     strategy:
       max-parallel: 3
       matrix:
-        pg-version: [10, 11, 12, 13, 14]
+        pg-version: [13, 14, 15]
     steps:
       - id: install
         run: |
