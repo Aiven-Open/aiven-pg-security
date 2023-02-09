@@ -26,6 +26,7 @@
 #include "utils/guc.h"
 #include "utils/fmgrtab.h"
 #include "utils/lsyscache.h"
+#include "utils/varlena.h"
 #include "nodes/nodes.h"
 #include "access/sysattr.h"
 
@@ -80,11 +81,17 @@ static const int NUM_RESERVED_AUTH_COLS = sizeof reserved_auth_col_names / sizeo
 /* GUC Variables */
 static bool pg_security_agent_enabled = false;
 static bool pg_security_agent_strict = false;
+static char *allowed_superuser_roles = NULL;
 
 /* Saved hook values in case of unload */
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 static object_access_hook_type next_object_access_hook = NULL;
 static ExecutorStart_hook_type prev_ExecutorStart_hook = NULL;
+
+/* bug that breaks some extension functionality due to nested queries inadvertently
+    reading, but not using, a reserved column name
+*/
+static bool BUG_01 = true;
 
 static bool
 allowed_guc_change_check_hook(bool *newval, void **extra, GucSource source)
@@ -99,6 +106,14 @@ allowed_guc_change_check_hook(bool *newval, void **extra, GucSource source)
      */
     return !(pg_security_agent_strict || creating_extension || is_security_restricted() || is_elevated());
 }
+
+static bool
+allowed_guc_change_allowed_superusers(char **newval, void **extra, GucSource source)
+{
+    /* same as with the boolean version */
+    return !(pg_security_agent_strict || creating_extension || is_security_restricted() || is_elevated());
+}
+
 /* returns true if the session and current user ids are different */
 static bool
 is_elevated(void)
@@ -134,6 +149,31 @@ is_security_restricted(void)
      * this occurs during VACUUM, ANALYZE, MATERIAL VIEW etc
      */
     return InSecurityRestrictedOperation();
+}
+
+/* check if a target role is in the list of roles that are permitted to have superuser */
+static bool
+allow_superuser_role(const char *target_role)
+{
+    List *allowed_superuser_list;
+    ListCell *role;
+
+    if (allowed_superuser_roles)
+    {
+        SplitIdentifierString(pstrdup(allowed_superuser_roles), ',', &allowed_superuser_list);
+
+        foreach (role, allowed_superuser_list)
+        {
+            char *allowed_role = (char *)lfirst(role);
+            if (strcmp(target_role, allowed_role) == 0)
+            {
+                list_free(allowed_superuser_list);
+                return true;
+            }
+        }
+        list_free(allowed_superuser_list);
+    }
+    return false;
 }
 
 static char *
@@ -261,6 +301,10 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
             // superuser or nosuperuser is supplied (both are treated as defname superuser) and check that the arg is set to true
             if (strncmp(defel->defname, "superuser", 10) == 0 && defGetBoolean(defel))
             {
+                // regardless of context (elevated privilege or not), check if the target role is allowed to be superuser
+                if (!allow_superuser_role(alterRoleStmt->role->rolename))
+                    elog(ERROR, "Role %s not in permitted superuser list", alterRoleStmt->role->rolename);
+
                 result = allow_role_stmt();
                 if (result != NULL)
                     elog(ERROR, "%s", result);
@@ -277,6 +321,10 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
             // check if we are granting superuser
             if (strncmp(defel->defname, "superuser", 10) == 0 && defGetBoolean(defel))
             {
+                // regardless of context (elevated privilege or not), check if the target role is allowed to be superuser
+                if (!allow_superuser_role(createRoleStmt->role))
+                    elog(ERROR, "Role %s not in permitted superuser list", createRoleStmt->role);
+
                 result = allow_role_stmt();
                 if (result != NULL)
                     elog(ERROR, "%s", result);
@@ -580,7 +628,7 @@ pg_proc_guard_checks(QueryDesc *queryDesc, int eflags)
     int index;
 
     /* only check function if security agent is enabled */
-    if (pg_security_agent_enabled)
+    if (pg_security_agent_enabled && !BUG_01)
     {
         switch (queryDesc->operation)
         {
@@ -706,7 +754,21 @@ void _PG_init(void)
                              NULL,
                              NULL);
 
+    // comma-separated list of allowed superuser roles (can be assigned superuser)
+    DefineCustomStringVariable("aiven.pg_security_agent_reserved_roles",
+                               "Comma-separated list of roles that can be assigned superuser",
+                               NULL,
+                               &allowed_superuser_roles,
+                               "postgres",         // default to postgres
+                               PGC_POSTMASTER,     // only at postmaster startup
+                               GUC_SUPERUSER_ONLY, // only show to superuser
+                               allowed_guc_change_allowed_superusers,
+                               NULL,
+                               NULL);
+
     // allow toggling of the security agent
+    // this variable definition should always be last, otherwise further defines
+    // stop working because the agent has defaulted to strict = on
     DefineCustomBoolVariable("aiven.pg_security_agent_strict",
                              "Toggle the agent into strict mode. Reserved actions are blocked regardless of context",
                              NULL,
@@ -717,6 +779,7 @@ void _PG_init(void)
                              allowed_guc_change_check_hook,
                              NULL,
                              NULL);
+
 
     if (set_reserved_oids())
     {
