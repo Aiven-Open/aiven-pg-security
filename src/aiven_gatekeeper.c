@@ -754,7 +754,21 @@ void _PG_init(void)
                              NULL,
                              NULL);
 
+    // comma-separated list of allowed superuser roles (can be assigned superuser)
+    DefineCustomStringVariable("aiven.pg_security_agent_reserved_roles",
+                               "Comma-separated list of roles that can be assigned superuser",
+                               NULL,
+                               &allowed_superuser_roles,
+                               "postgres",         // default to postgres
+                               PGC_POSTMASTER,     // only at postmaster startup
+                               GUC_SUPERUSER_ONLY, // only show to superuser
+                               allowed_guc_change_allowed_superusers,
+                               NULL,
+                               NULL);
+
     // allow toggling of the security agent
+    // this variable definition should always be last, otherwise further defines
+    // stop working because the agent has defaulted to strict = on
     DefineCustomBoolVariable("aiven.pg_security_agent_strict",
                              "Toggle the agent into strict mode. Reserved actions are blocked regardless of context",
                              NULL,
@@ -766,17 +780,6 @@ void _PG_init(void)
                              NULL,
                              NULL);
 
-    // comma-separated list of allowed superuser roles (can be assigned superuser)
-    DefineCustomStringVariable("aiven.pg_security_agent_reserved_roles",
-                               "Comma-separated list of roles that can be assigned superuser",
-                               NULL,
-                               &allowed_superuser_roles,
-                               "postgres",              // default to postgres
-                               PGC_POSTMASTER,     // only at postmaster startup
-                               GUC_SUPERUSER_ONLY, // only show to superuser
-                               allowed_guc_change_allowed_superusers,
-                               NULL,
-                               NULL);
 
     if (set_reserved_oids())
     {
