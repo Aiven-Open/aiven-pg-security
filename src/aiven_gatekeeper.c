@@ -26,6 +26,7 @@
 #include "utils/guc.h"
 #include "utils/fmgrtab.h"
 #include "utils/lsyscache.h"
+#include "utils/resowner.h"
 #include "utils/varlena.h"
 #include "nodes/nodes.h"
 #include "access/sysattr.h"
@@ -131,7 +132,7 @@ is_elevated(void)
     /* short circuit if the current and session user are the same
      * saves on a slightly more expensive role fetch
      */
-    if (currentUserId == sessionUserId)
+    if (currentUserId == sessionUserId || CurrentResourceOwner == NULL)
     {
         return false;
     }
