@@ -290,7 +290,7 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
         alterRoleStmt = (AlterRoleStmt *)stmt;
 
         // check we aren't altering a reserved role (existing superuser)
-        roleoid = get_role_oid(alterRoleStmt->role->rolename, true);
+        roleoid = get_rolespec_oid(alterRoleStmt->role, true);
         result = allow_grant_or_alter_role(roleoid);
         if (result != NULL)
             elog(ERROR, "%s", result);
