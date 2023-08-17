@@ -46,7 +46,7 @@ jobs:
 
     steps:
     - id: install
-        run: |
+      run: |
           # Remove preinstalled Postgres because this will conflict with the version we actually want.
           sudo apt-get remove -u postgresql\*
           # Get the postgresql gpg key
