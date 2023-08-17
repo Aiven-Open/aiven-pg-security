@@ -45,6 +45,17 @@ jobs:
         # Learn more about CodeQL language support at https://aka.ms/codeql-docs/language-support
 
     steps:
+    - id: install
+        run: |
+          # Remove preinstalled Postgres because this will conflict with the version we actually want.
+          sudo apt-get remove -u postgresql\*
+          # Get the postgresql gpg key
+          sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 7FCC7D46ACCC4CF8
+          # Setup the Postgres repositories
+          sudo sh -c 'echo "deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          sudo apt-get update
+          # Install build deps
+          sudo apt-get install -y postgresql-server-dev-14
     - name: Checkout repository
       uses: actions/checkout@v3
 
