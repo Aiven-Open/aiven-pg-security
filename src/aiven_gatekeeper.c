@@ -20,6 +20,7 @@
 #include "nodes/value.h"
 #include "fmgr.h"
 #include "miscadmin.h"
+#include "parser/parse_relation.h"
 #include "tcop/utility.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
@@ -627,20 +628,31 @@ pg_proc_guard_checks(QueryDesc *queryDesc, int eflags)
     RangeTblEntry *rt;
     Bitmapset *colset;
     int index;
-
+#if PG16_GTE
+    List *permInfos;
+    RTEPermissionInfo *permInfo;
+#endif
     /* only check function if security agent is enabled */
     if (pg_security_agent_enabled && !BUG_01)
     {
         switch (queryDesc->operation)
         {
         case CMD_SELECT:
+#if PG16_GTE
+	    permInfos = queryDesc->plannedstmt->permInfos;
+#endif
             foreach (resultRelations, queryDesc->plannedstmt->rtable)
             {
                 rt = lfirst(resultRelations);
                 switch (rt->relid)
                 {
                 case 1260: // pg_authid
+#if PG16_GTE
+                    permInfo = getRTEPermissionInfo(permInfos, rt);
+                    colset = permInfo->selectedCols;
+#else
                     colset = rt->selectedCols;
+#endif
                     index = -1;
                     while ((index = bms_next_member(colset, index)) >= 0)
                     {
@@ -673,6 +685,9 @@ pg_proc_guard_checks(QueryDesc *queryDesc, int eflags)
         case CMD_INSERT:
         case CMD_UPDATE:
         case CMD_DELETE:
+#if PG16_GTE
+	    permInfos = queryDesc->plannedstmt->permInfos;
+#endif
             foreach (resultRelations, queryDesc->plannedstmt->rtable)
             {
                 rt = lfirst(resultRelations);
@@ -692,11 +707,18 @@ pg_proc_guard_checks(QueryDesc *queryDesc, int eflags)
                      * actually alter pg_proc directly during install/upgrade.
                      * block changes to proowner, prolang, prosecdef, proacl, prosrc
                      */
+#if PG16_GTE
+                    permInfo = getRTEPermissionInfo(permInfos, rt);
+                    if (queryDesc->operation == CMD_INSERT)
+                        colset = permInfo->insertedCols;
+                    else
+                        colset = permInfo->updatedCols;
+#else
                     if (queryDesc->operation == CMD_INSERT)
                         colset = rt->insertedCols;
                     else
                         colset = rt->updatedCols;
-
+#endif
                     index = -1;
                     while ((index = bms_next_member(colset, index)) >= 0)
                     {

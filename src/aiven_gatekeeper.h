@@ -13,6 +13,7 @@
 #define PG11_GTE (PG_VERSION_NUM >= 110000)
 #define PG13_GTE (PG_VERSION_NUM >= 130000)
 #define PG14_GTE (PG_VERSION_NUM >= 140000)
+#define PG16_GTE (PG_VERSION_NUM >= 160000)
 
 /* The process_utility_hook function changed in PG13 and again in PG14
  * versions from introduction (PG9) through PG12 have the same 7 argument structure
