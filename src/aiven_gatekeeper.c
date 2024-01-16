@@ -211,11 +211,10 @@ allow_granted_roles(List *addroleto)
         result = allow_grant_or_alter_role(role_member_oid);
         if (result != NULL)
         {
-            list_free(addroleto);
             elog(ERROR, "%s", result);
+            return;
         }
     }
-    list_free(addroleto);
 }
 
 static char *
