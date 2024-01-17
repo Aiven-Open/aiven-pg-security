@@ -35,7 +35,8 @@ extern "C" fn process_utility_hook(
   qc: *mut pg_sys::QueryCompletion,
 ) {
 
-  let stmt_type: pg_sys::NodeTag = unsafe { (*(*pstmt).utilityStmt).type_ };
+  let stmt: *mut pg_sys::Node = unsafe {(*pstmt).utilityStmt };
+  let stmt_type: pg_sys::NodeTag = unsafe { (*stmt).type_ };
 
   match stmt_type{
     pg_sys::NodeTag::T_AlterRoleStmt=>info!("ALTER ROLE STATEMENT"),
@@ -45,8 +46,19 @@ extern "C" fn process_utility_hook(
     pg_sys::NodeTag::T_CopyStmt=>info!("COPY STATEMENT"),
     pg_sys::NodeTag::T_VariableSetStmt=>info!("VARIABLE STATEMENT"),
     pg_sys::NodeTag::T_CreateFunctionStmt=>info!("CREATE FUNCTION STATEMENT"),
-    pg_sys::NodeTag::T_CreateExtensionStmt=>info!("CREATE EXTENSION STATEMENT"),
-    _=>info!("Unknown ProcessUtility")
+    pg_sys::NodeTag::T_CreateExtensionStmt=>{
+        // check if allowed extension
+        let createExtStmt: PgBox<pg_sys::CreateExtensionStmt>;
+        let extname: String;
+        unsafe {
+            createExtStmt = PgBox::from_pg(stmt as *mut pg_sys::CreateExtensionStmt);
+            extname= std::ffi::CStr::from_ptr(createExtStmt.extname).to_string_lossy().into_owned();
+        }
+        if extname == "file_fdw" {
+            pg_sys::error!("{} extension not allowed", extname);
+        }
+    },
+    _=> (),
   }
 
   unsafe {
