@@ -6,8 +6,12 @@ static mut PREV_PROCESS_UTILITY_HOOK: pg_sys::ProcessUtility_hook_type = None;
 static mut PREV_EXECUTOR_START_HOOK: pg_sys::ExecutorStart_hook_type = None;
 
 #[pg_extern]
-fn hello_hello_world() -> &'static str {
-    "Hello, hello_world"
+fn is_enabled() -> bool {
+    return true;
+}
+
+fn is_security_restricted() -> bool {
+    return true;
 }
 
 #[pg_guard]
@@ -43,18 +47,41 @@ extern "C" fn process_utility_hook(
     pg_sys::NodeTag::T_CreateRoleStmt=>info!("CREATE ROLE STATEMENT"),
     pg_sys::NodeTag::T_DropRoleStmt=>info!("DROP ROLE STATEMENT"),
     pg_sys::NodeTag::T_GrantRoleStmt=>info!("GRANT ROLE STATEMENT"),
-    pg_sys::NodeTag::T_CopyStmt=>info!("COPY STATEMENT"),
-    pg_sys::NodeTag::T_VariableSetStmt=>info!("VARIABLE STATEMENT"),
+    pg_sys::NodeTag::T_CopyStmt=>{
+        let copyStmt: PgBox<pg_sys::CopyStmt> = unsafe {PgBox::from_pg(stmt as *mut pg_sys::CopyStmt)};
+        // always deny access to code execution
+        if copyStmt.is_program {
+            pg_sys::error!("COPY TO/FROM PROGRAM not allowed");
+        }
+
+        // otherwise, check if we are trying to read from file and are in a context that allows file system access
+        if !copyStmt.filename.is_null() {
+            // strict
+            // pg_sys::error!("COPY TO/FROM FILE not allowed");
+            // creating extension
+            if pg_sys::InSecurityRestrictedOperation(){
+                pg_sys::error!("COPY TO/FROM FILE not allowed in extensions");
+            }
+            // security restricted
+            if is_security_restricted(){
+                pg_sys::error!("COPY TO/FROM FILE not allowed in SECURITY_RESTRICTED_OPERATION");
+            }
+            // elevated
+            //pg_sys::error!("COPY TO/FROM FILE not allowed");
+        }
+    },
+    pg_sys::NodeTag::T_VariableSetStmt=>(), // currently we don't do any checks on VariableSet
     pg_sys::NodeTag::T_CreateFunctionStmt=>info!("CREATE FUNCTION STATEMENT"),
     pg_sys::NodeTag::T_CreateExtensionStmt=>{
-        // check if allowed extension
+        // get extension statement and name of extension
         let createExtStmt: PgBox<pg_sys::CreateExtensionStmt>;
         let extname: String;
         unsafe {
             createExtStmt = PgBox::from_pg(stmt as *mut pg_sys::CreateExtensionStmt);
             extname= std::ffi::CStr::from_ptr(createExtStmt.extname).to_string_lossy().into_owned();
         }
-        if extname == "file_fdw" {
+        // check if disallowed extension
+        if extname == "file_fdw" { // error and abort the current transaction if disallowed extension
             pg_sys::error!("{} extension not allowed", extname);
         }
     },
