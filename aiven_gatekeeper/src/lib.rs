@@ -1,9 +1,14 @@
 use pgrx::prelude::*;
+use pgrx::GucRegistry;
+use pgrx::GucFlags;
+use pgrx::GucSetting;
+use pgrx::GucContext;
 
 pgrx::pg_module_magic!();
 
 static mut PREV_PROCESS_UTILITY_HOOK: pg_sys::ProcessUtility_hook_type = None;
 static mut PREV_EXECUTOR_START_HOOK: pg_sys::ExecutorStart_hook_type = None;
+static  GUC_IS_STRICT: GucSetting<bool> = GucSetting::<bool>::new(false);
 
 #[pg_extern]
 fn is_enabled() -> bool {
@@ -45,7 +50,9 @@ fn copy_stmt_checks(stmt: *mut pg_sys::Node) {
     // otherwise, check if we are trying to read from file and are in a context that allows file system access
     if !copy_stmt.filename.is_null() {
         // strict
-        // pg_sys::error!("COPY TO/FROM FILE not allowed");
+        if GUC_IS_STRICT.get() {
+          pg_sys::error!("COPY TO/FROM FILE not allowed");
+        }
         // creating extension
         if is_security_restricted() {
             pg_sys::error!("COPY TO/FROM FILE not allowed in extensions");
@@ -146,8 +153,17 @@ extern "C" fn process_utility_hook(
 pub extern "C" fn _PG_init() {
   unsafe {
     // if !pg_sys::process_shared_preload_libraries_in_progress {
-    //   error!("pgx_trace_hooks is not in shared_preload_libraries");
+    //   error!("aiven_pg_gatekeeper is not in shared_preload_libraries");
     // }
+    
+    GucRegistry::define_bool_guc(
+        "aiven.pg_security_agent_strict",
+        "Toggle the agent into strict mode. Reserved actions are blocked regardless of context",
+        "Toggle the agent into strict mode. Reserved actions are blocked regardless of context",
+        &GUC_IS_STRICT,
+        GucContext::Userset,//GucContext::Postmaster,
+        GucFlags::SUPERUSER_ONLY,
+    );
 
     PREV_EXECUTOR_START_HOOK = pg_sys::ExecutorStart_hook;
     pg_sys::ExecutorStart_hook = Some(executor_start_hook);
