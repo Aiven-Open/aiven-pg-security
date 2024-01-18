@@ -4,7 +4,13 @@ use pgrx::GucFlags;
 use pgrx::GucSetting;
 use pgrx::GucContext;
 
+use roles::is_role_modify_allowed;
+use roles::is_restricted_role_or_grant;
+
 pgrx::pg_module_magic!();
+
+mod roles;
+use crate::roles::is_elevated;
 
 static mut PREV_PROCESS_UTILITY_HOOK: pg_sys::ProcessUtility_hook_type = None;
 static mut PREV_EXECUTOR_START_HOOK: pg_sys::ExecutorStart_hook_type = None;
@@ -33,27 +39,6 @@ fn is_agent_enabled() -> bool {
     return GUC_AGENT_IS_ENABLED.get();
 }
 
-fn is_elevated() -> bool {
-    /* if current user != session and the current user is
-     * a superuser, but the original session_user is not,
-     * we can say that we are in an elevated context.
-     */
-    unsafe {
-      let current_user_id: pg_sys::Oid = pg_sys::GetUserId();
-      let session_user_id: pg_sys::Oid = pg_sys::GetSessionUserId();
-
-      /* short circuit if the current and session user are the same
-      * saves on a slightly more expensive role fetch
-      */
-      if current_user_id == session_user_id || pg_sys::CurrentResourceOwner.is_null() {
-          return false;
-      }
-
-      /* elevated to supersuser when the session auth user does not have superuser privileges */
-      return pg_sys::superuser_arg(current_user_id) && !pg_sys::session_auth_is_superuser;
-    }
-}
-
 fn copy_stmt_checks(stmt: *mut pg_sys::Node) {
     let copy_stmt: PgBox<pg_sys::CopyStmt> = unsafe {PgBox::from_pg(stmt as *mut pg_sys::CopyStmt)};
     // always deny access to code execution
@@ -62,7 +47,8 @@ fn copy_stmt_checks(stmt: *mut pg_sys::Node) {
     }
 
     // otherwise, check if we are trying to read from file and are in a context that allows file system access
-    if !copy_stmt.filename.is_null() {
+    // copy_stmt.filename pointer will be NULL for STDIN
+    if copy_stmt.filename.is_null() == false {
         // strict
         if is_strict_mode_enabled() {
           pg_sys::error!("COPY TO/FROM FILE not allowed");
@@ -88,12 +74,35 @@ fn create_extension_checks(stmt: *mut pg_sys::Node) {
     let extname: String;
     unsafe {
         create_ext_stmt = PgBox::from_pg(stmt as *mut pg_sys::CreateExtensionStmt);
-            extname= std::ffi::CStr::from_ptr(create_ext_stmt.extname).to_string_lossy().into_owned();
+        extname= std::ffi::CStr::from_ptr(create_ext_stmt.extname).to_string_lossy().into_owned();
     }
     // check if disallowed extension
     if extname == "file_fdw" { // error and abort the current transaction if disallowed extension
         pg_sys::error!("{} extension not allowed", extname);
     }
+}
+
+fn grant_role_checks(stmt: *mut pg_sys::Node) {
+    // get extension statement and name of extension
+    let grant_role_stmt: PgBox<pg_sys::GrantRoleStmt>;
+    let mut access_privilege: PgBox<pg_sys::AccessPriv>;
+
+    unsafe {
+        grant_role_stmt = PgBox::from_pg(stmt as *mut pg_sys::GrantRoleStmt);
+        let lst = pgrx::PgList::from_pg(grant_role_stmt.granted_roles);
+        for granted_role in lst.iter_ptr() {
+            access_privilege = PgBox::from_pg(granted_role as *mut pg_sys::AccessPriv);
+            //let priv_name = std::ffi::CStr::from_ptr(access_privilege.priv_name).to_string_lossy().into_owned();
+            let roloid : pg_sys::Oid = pg_sys::get_role_oid(access_privilege.priv_name, false);
+            if is_restricted_role_or_grant(roloid) {
+                let (allowed, msg) = is_role_modify_allowed(is_strict_mode_enabled());
+                if allowed == false {
+                    pg_sys::error!("{}", msg)
+                }
+            }
+        }
+    }
+
 }
 
 #[pg_guard]
@@ -130,7 +139,7 @@ extern "C" fn process_utility_hook(
             pg_sys::NodeTag::T_AlterRoleStmt=>info!("ALTER ROLE STATEMENT"),
             pg_sys::NodeTag::T_CreateRoleStmt=>info!("CREATE ROLE STATEMENT"),
             pg_sys::NodeTag::T_DropRoleStmt=>info!("DROP ROLE STATEMENT"),
-            pg_sys::NodeTag::T_GrantRoleStmt=>info!("GRANT ROLE STATEMENT"),
+            pg_sys::NodeTag::T_GrantRoleStmt=>grant_role_checks(stmt),
             pg_sys::NodeTag::T_CopyStmt=>copy_stmt_checks(stmt),
             pg_sys::NodeTag::T_VariableSetStmt=>(), // currently we don't do any checks on VariableSet
             pg_sys::NodeTag::T_CreateFunctionStmt=>info!("CREATE FUNCTION STATEMENT"),
