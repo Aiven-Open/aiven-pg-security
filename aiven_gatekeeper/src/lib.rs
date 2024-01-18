@@ -8,7 +8,8 @@ pgrx::pg_module_magic!();
 
 static mut PREV_PROCESS_UTILITY_HOOK: pg_sys::ProcessUtility_hook_type = None;
 static mut PREV_EXECUTOR_START_HOOK: pg_sys::ExecutorStart_hook_type = None;
-static  GUC_IS_STRICT: GucSetting<bool> = GucSetting::<bool>::new(false);
+static GUC_IS_STRICT: GucSetting<bool> = GucSetting::<bool>::new(false);
+static GUC_AGENT_IS_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
 
 #[pg_extern]
 fn is_enabled() -> bool {
@@ -152,17 +153,27 @@ extern "C" fn process_utility_hook(
 #[pg_guard]
 pub extern "C" fn _PG_init() {
   unsafe {
-    // if !pg_sys::process_shared_preload_libraries_in_progress {
-    //   error!("aiven_pg_gatekeeper is not in shared_preload_libraries");
-    // }
+    // must be loaded as a shared_library
+    if !pg_sys::process_shared_preload_libraries_in_progress {
+      error!("aiven_pg_gatekeeper is not in shared_preload_libraries");
+    }
     
+    GucRegistry::define_bool_guc(
+      "aiven.pg_security_agent",
+      "Toggle the security agent checks on and off",
+      "Toggle the security agent checks on and off",
+      &GUC_AGENT_IS_ENABLED,
+      GucContext::Sighup,
+      GucFlags::SUPERUSER_ONLY|GucFlags::DISALLOW_IN_AUTO_FILE|GucFlags::NOT_WHILE_SEC_REST,
+  );
+
     GucRegistry::define_bool_guc(
         "aiven.pg_security_agent_strict",
         "Toggle the agent into strict mode. Reserved actions are blocked regardless of context",
         "Toggle the agent into strict mode. Reserved actions are blocked regardless of context",
         &GUC_IS_STRICT,
-        GucContext::Userset,//GucContext::Postmaster,
-        GucFlags::SUPERUSER_ONLY,
+        GucContext::Postmaster,
+        GucFlags::SUPERUSER_ONLY|GucFlags::DISALLOW_IN_AUTO_FILE|GucFlags::NOT_WHILE_SEC_REST,
     );
 
     PREV_EXECUTOR_START_HOOK = pg_sys::ExecutorStart_hook;
