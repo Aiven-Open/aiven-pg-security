@@ -3,6 +3,7 @@ use std::ffi::CStr;
 
 use functions::is_function_language_allowed;
 use functions::is_reserved_internal_function;
+use pgrx::pg_sys::superuser;
 use pgrx::prelude::*;
 use pgrx::GucRegistry;
 use pgrx::GucFlags;
@@ -18,6 +19,8 @@ pgrx::pg_module_magic!();
 
 mod roles;
 mod functions;
+use crate::functions::is_reserved_internal_function_oid;
+use crate::functions::resolve_internal_func_oids;
 use crate::roles::is_elevated;
 
 static mut PREV_PROCESS_UTILITY_HOOK: pg_sys::ProcessUtility_hook_type = None;
@@ -195,14 +198,18 @@ fn function_create_checks(stmt: *mut pg_sys::Node) {
         }
         if check_body { // check if a reserved function
             let sql_body: &str = std::ffi::CStr::from_ptr(sql_body_ptr).to_str().unwrap();
-            is_reserved_internal_function(sql_body);
+            if is_reserved_internal_function(sql_body){
+                pg_sys::error!("using builtin function {} is not allowed", sql_body);
+            }
         }
     }
 }
 
 #[pg_guard]
 extern "C" fn executor_start_hook(query_desc: *mut pg_sys::QueryDesc, eflags: i32) {
-    info!("ExecutorStart");
+    if is_agent_enabled(){
+
+    }
     unsafe {
         if let Some(prev_hook) = PREV_EXECUTOR_START_HOOK {
             prev_hook(query_desc, eflags);
@@ -280,8 +287,20 @@ extern "C" fn object_access_hook(
 ) {
     // only if the agent is enabled and this prior to the execution of a function
     if is_agent_enabled() && access == OAT_FUNCTION_EXECUTE {
+        info!("OAT EXECUTE");
         // check object access restrictions
+        if is_reserved_internal_function_oid(object_id){
 
+            if is_strict_mode_enabled() || is_elevated() || is_security_restricted() || is_local_user_id_change() {
+                // get friendly name
+                let fn_name = "reserved func";
+                pg_sys::error!("using builtin function {} is not allowed", fn_name);
+            }
+            if !unsafe{superuser()} {
+                let fn_name = "reserved_func";
+                pg_sys::error!("using builtin function {} is not allowed by non-superusers", fn_name);
+            }
+        }
     }
 
     // continue
@@ -329,6 +348,8 @@ pub extern "C" fn _PG_init() {
             GucContext::Postmaster,
             GucFlags::SUPERUSER_ONLY|GucFlags::DISALLOW_IN_AUTO_FILE|GucFlags::NOT_WHILE_SEC_REST|GucFlags::NO_SHOW_ALL,
         );
+
+        resolve_internal_func_oids();
 
         PREV_EXECUTOR_START_HOOK = pg_sys::ExecutorStart_hook;
         pg_sys::ExecutorStart_hook = Some(executor_start_hook);
