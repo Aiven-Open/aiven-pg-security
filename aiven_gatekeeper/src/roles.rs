@@ -56,23 +56,22 @@ pub fn is_elevated() -> bool {
     }
 }
 
-pub fn is_role_modify_allowed(in_strict_mode: bool) -> (bool, &'static str) {
+pub fn is_role_modify_allowed(in_strict_mode: bool) -> bool {
     if in_strict_mode || is_elevated() {
-        return (false, "ROLE modification to SUPERUSER/privileged role not allowed");
+        pg_sys::error!("ROLE modification to SUPERUSER/privileged role not allowed");
     }
 
     if is_security_restricted() {
-        return (false, "ROLE modification to SUPERUSER/privileged role not allowed in SECURITY_RESTRICTED_OPERATION");
+        pg_sys::error!("ROLE modification to SUPERUSER/privileged role not allowed in SECURITY_RESTRICTED_OPERATION");
     }
 
     if is_local_user_id_change() {
-        return (false, "ROLE modification to SUPERUSER/privileged role not allowed in extensions");
+        pg_sys::error!("ROLE modification to SUPERUSER/privileged role not allowed in extensions");
     }
-
-    return (true, "");
+    return true;
 }
 
-pub fn is_allowed_superuser_role(role_name: String, reserved_roles: &str) -> bool {
+pub fn is_allowed_superuser_role(role_name: &str, reserved_roles: &str) -> bool {
     let roles: std::str::Split<'_, &str> = reserved_roles.split(",");
     for role in roles {
         if role == role_name {

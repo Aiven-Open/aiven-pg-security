@@ -1,6 +1,8 @@
 
 use std::ffi::CStr;
 
+use functions::is_function_language_allowed;
+use functions::is_reserved_internal_function;
 use pgrx::prelude::*;
 use pgrx::GucRegistry;
 use pgrx::GucFlags;
@@ -8,12 +10,14 @@ use pgrx::GucSetting;
 use pgrx::GucContext;
 
 use roles::is_allowed_superuser_role;
+use roles::is_local_user_id_change;
 use roles::is_role_modify_allowed;
 use roles::is_restricted_role_or_grant;
 
 pgrx::pg_module_magic!();
 
 mod roles;
+mod functions;
 use crate::roles::is_elevated;
 
 static mut PREV_PROCESS_UTILITY_HOOK: pg_sys::ProcessUtility_hook_type = None;
@@ -100,16 +104,13 @@ fn create_role_checks(stmt: *mut pg_sys::Node) {
             let option_name = std::ffi::CStr::from_ptr(option.defname).to_string_lossy().into_owned();
 
             // check if role is allowed to be a superuser, is in GUC_RESERVED_SU_ROLES
-            let role_name: String = std::ffi::CStr::from_ptr(create_role_stmt.role).to_string_lossy().into_owned();
-            if is_allowed_superuser_role(role_name.clone(), GUC_RESERVED_SU_ROLES.get().unwrap().to_str().unwrap()) == false {
+            let role_name: &str = std::ffi::CStr::from_ptr(create_role_stmt.role).to_str().unwrap();
+            if is_allowed_superuser_role(role_name, GUC_RESERVED_SU_ROLES.get().unwrap().to_str().unwrap()) == false {
                 pg_sys::error!("Role {} not in permitted superuser list", role_name)
             }
             // check if we are setting superuser true
             if option_name == "superuser" && pg_sys::defGetBoolean(option.as_ptr()) {
-                let (allowed, msg) = is_role_modify_allowed(is_strict_mode_enabled());
-                if allowed == false {
-                    pg_sys::error!("{}", msg)
-                }
+                is_role_modify_allowed(is_strict_mode_enabled());
             }
         }
     }
@@ -124,10 +125,7 @@ fn alter_role_checks(stmt: *mut pg_sys::Node) {
         // check we aren't altering a reserved role (existing superuser)
         let role_oid = pg_sys::get_rolespec_oid(alter_role_stmt.role, true);
         if is_restricted_role_or_grant(role_oid){
-            let (allowed, msg) = is_role_modify_allowed(is_strict_mode_enabled());
-                if allowed == false {
-                    pg_sys::error!("{}", msg)
-                }
+            is_role_modify_allowed(is_strict_mode_enabled());
         }
 
         let options_lst = pgrx::PgList::from_pg(alter_role_stmt.options);
@@ -136,16 +134,13 @@ fn alter_role_checks(stmt: *mut pg_sys::Node) {
             let option_name = std::ffi::CStr::from_ptr(option.defname).to_string_lossy().into_owned();
 
             // check if role is allowed to be a superuser, is in GUC_RESERVED_SU_ROLES
-            let role_name: String = std::ffi::CStr::from_ptr((*alter_role_stmt.role).rolename).to_string_lossy().into_owned();
-            if is_allowed_superuser_role(role_name.clone(), GUC_RESERVED_SU_ROLES.get().unwrap().to_str().unwrap()) == false {
+            let role_name: &str= std::ffi::CStr::from_ptr((*alter_role_stmt.role).rolename).to_str().unwrap();
+            if is_allowed_superuser_role(role_name, GUC_RESERVED_SU_ROLES.get().unwrap().to_str().unwrap()) == false {
                 pg_sys::error!("Role {} not in permitted superuser list", role_name)
             }
             // check if we are setting superuser true
             if option_name == "superuser" && pg_sys::defGetBoolean(option.as_ptr()) {
-                let (allowed, msg) = is_role_modify_allowed(is_strict_mode_enabled());
-                if allowed == false {
-                    pg_sys::error!("{}", msg)
-                }
+                is_role_modify_allowed(is_strict_mode_enabled());
             }
         }
     }
@@ -164,17 +159,45 @@ fn grant_role_checks(stmt: *mut pg_sys::Node) {
             //let priv_name = std::ffi::CStr::from_ptr(access_privilege.priv_name).to_string_lossy().into_owned();
             let roloid : pg_sys::Oid = pg_sys::get_role_oid(access_privilege.priv_name, false);
             if is_restricted_role_or_grant(roloid) {
-                let (allowed, msg) = is_role_modify_allowed(is_strict_mode_enabled());
-                if allowed == false {
-                    pg_sys::error!("{}", msg)
-                }
+                is_role_modify_allowed(is_strict_mode_enabled());
             }
         }
     }
 }
 
 fn function_create_checks(stmt: *mut pg_sys::Node) {
+    let create_func_stmt: PgBox<pg_sys::CreateFunctionStmt>;
+    let mut check_body: bool = false;
+    let mut option: PgBox<pg_sys::DefElem>;
+    let mut sql_body_ptr: *mut i8 = std::ptr::null_mut();
 
+    unsafe {
+        create_func_stmt = PgBox::from_pg(stmt as *mut pg_sys::CreateFunctionStmt);
+        let options_lst = pgrx::PgList::from_pg(create_func_stmt.options);
+        for opt_raw in options_lst.iter_ptr() {
+            option = PgBox::from_pg(opt_raw as *mut pg_sys::DefElem);
+            let option_name = std::ffi::CStr::from_ptr(option.defname).to_str().unwrap();
+            // creating a function with specific language
+            if option_name == "language" {
+
+                let lang_name: &str = std::ffi::CStr::from_ptr(pg_sys::defGetString(option.as_ptr())).to_str().unwrap();
+                check_body = match lang_name {
+                    "plperlu"|"plpythonu"=>is_function_language_allowed(lang_name,is_strict_mode_enabled()) && false, // we don't need to check the body, only that the language isn't allowed
+                    "internal"=> is_strict_mode_enabled() || is_elevated() || is_security_restricted() || is_local_user_id_change(),
+                    _ => false,
+                };
+            }
+            // extract the sql body
+            if option_name == "as" {
+                // get a pointer to the sql_body
+                sql_body_ptr = pg_sys::defGetString(option.as_ptr());
+            }
+        }
+        if check_body { // check if a reserved function
+            let sql_body: &str = std::ffi::CStr::from_ptr(sql_body_ptr).to_str().unwrap();
+            is_reserved_internal_function(sql_body);
+        }
+    }
 }
 
 #[pg_guard]
