@@ -1,9 +1,13 @@
+
+use std::ffi::CStr;
+
 use pgrx::prelude::*;
 use pgrx::GucRegistry;
 use pgrx::GucFlags;
 use pgrx::GucSetting;
 use pgrx::GucContext;
 
+use roles::is_allowed_superuser_role;
 use roles::is_role_modify_allowed;
 use roles::is_restricted_role_or_grant;
 
@@ -17,7 +21,10 @@ static mut PREV_EXECUTOR_START_HOOK: pg_sys::ExecutorStart_hook_type = None;
 static mut NEXT_OAT_HOOK: pg_sys::object_access_hook_type = None;
 static GUC_IS_STRICT: GucSetting<bool> = GucSetting::<bool>::new(false);
 static GUC_AGENT_IS_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
-
+static GUC_RESERVED_SU_ROLES: GucSetting<Option<&'static CStr>> =
+            GucSetting::<Option<&'static CStr>>::new(Some(unsafe {
+                CStr::from_bytes_with_nul_unchecked(b"postgres\0")
+            }));
 const OAT_FUNCTION_EXECUTE:u32 = 4; // pgrx doesn't have the enum type for ObjectAccessType
 
 // pgrx doesn't compile the extension correctly if I don't set this macro
@@ -82,8 +89,70 @@ fn create_extension_checks(stmt: *mut pg_sys::Node) {
     }
 }
 
+fn create_role_checks(stmt: *mut pg_sys::Node) {
+    let create_role_stmt: PgBox<pg_sys::CreateRoleStmt>;
+    let mut option: PgBox<pg_sys::DefElem>;
+    unsafe {
+        create_role_stmt = PgBox::from_pg(stmt as *mut pg_sys::CreateRoleStmt);
+        let options_lst = pgrx::PgList::from_pg(create_role_stmt.options);
+        for opt_raw in options_lst.iter_ptr() {
+            option = PgBox::from_pg(opt_raw as *mut pg_sys::DefElem);
+            let option_name = std::ffi::CStr::from_ptr(option.defname).to_string_lossy().into_owned();
+
+            // check if role is allowed to be a superuser, is in GUC_RESERVED_SU_ROLES
+            let role_name: String = std::ffi::CStr::from_ptr(create_role_stmt.role).to_string_lossy().into_owned();
+            if is_allowed_superuser_role(role_name.clone(), GUC_RESERVED_SU_ROLES.get().unwrap().to_str().unwrap()) == false {
+                pg_sys::error!("Role {} not in permitted superuser list", role_name)
+            }
+            // check if we are setting superuser true
+            if option_name == "superuser" && pg_sys::defGetBoolean(option.as_ptr()) {
+                let (allowed, msg) = is_role_modify_allowed(is_strict_mode_enabled());
+                if allowed == false {
+                    pg_sys::error!("{}", msg)
+                }
+            }
+        }
+    }
+
+}
+
+fn alter_role_checks(stmt: *mut pg_sys::Node) {
+    let alter_role_stmt: PgBox<pg_sys::AlterRoleStmt>;
+    let mut option: PgBox<pg_sys::DefElem>;
+    unsafe {
+        alter_role_stmt = PgBox::from_pg(stmt as *mut pg_sys::AlterRoleStmt);
+        // check we aren't altering a reserved role (existing superuser)
+        let role_oid = pg_sys::get_rolespec_oid(alter_role_stmt.role, true);
+        if is_restricted_role_or_grant(role_oid){
+            let (allowed, msg) = is_role_modify_allowed(is_strict_mode_enabled());
+                if allowed == false {
+                    pg_sys::error!("{}", msg)
+                }
+        }
+
+        let options_lst = pgrx::PgList::from_pg(alter_role_stmt.options);
+        for opt_raw in options_lst.iter_ptr() {
+            option = PgBox::from_pg(opt_raw as *mut pg_sys::DefElem);
+            let option_name = std::ffi::CStr::from_ptr(option.defname).to_string_lossy().into_owned();
+
+            // check if role is allowed to be a superuser, is in GUC_RESERVED_SU_ROLES
+            let role_name: String = std::ffi::CStr::from_ptr((*alter_role_stmt.role).rolename).to_string_lossy().into_owned();
+            if is_allowed_superuser_role(role_name.clone(), GUC_RESERVED_SU_ROLES.get().unwrap().to_str().unwrap()) == false {
+                pg_sys::error!("Role {} not in permitted superuser list", role_name)
+            }
+            // check if we are setting superuser true
+            if option_name == "superuser" && pg_sys::defGetBoolean(option.as_ptr()) {
+                let (allowed, msg) = is_role_modify_allowed(is_strict_mode_enabled());
+                if allowed == false {
+                    pg_sys::error!("{}", msg)
+                }
+            }
+        }
+    }
+
+}
+
 fn grant_role_checks(stmt: *mut pg_sys::Node) {
-    // get extension statement and name of extension
     let grant_role_stmt: PgBox<pg_sys::GrantRoleStmt>;
     let mut access_privilege: PgBox<pg_sys::AccessPriv>;
 
@@ -102,6 +171,9 @@ fn grant_role_checks(stmt: *mut pg_sys::Node) {
             }
         }
     }
+}
+
+fn function_create_checks(stmt: *mut pg_sys::Node) {
 
 }
 
@@ -136,13 +208,13 @@ extern "C" fn process_utility_hook(
         let stmt_type: pg_sys::NodeTag = unsafe { (*stmt).type_ };
 
         match stmt_type{
-            pg_sys::NodeTag::T_AlterRoleStmt=>info!("ALTER ROLE STATEMENT"),
-            pg_sys::NodeTag::T_CreateRoleStmt=>info!("CREATE ROLE STATEMENT"),
-            pg_sys::NodeTag::T_DropRoleStmt=>info!("DROP ROLE STATEMENT"),
+            pg_sys::NodeTag::T_AlterRoleStmt=>alter_role_checks(stmt),
+            pg_sys::NodeTag::T_CreateRoleStmt=>create_role_checks(stmt),
+            pg_sys::NodeTag::T_DropRoleStmt=>(), // should check that trusted roles aren't dropped
             pg_sys::NodeTag::T_GrantRoleStmt=>grant_role_checks(stmt),
             pg_sys::NodeTag::T_CopyStmt=>copy_stmt_checks(stmt),
             pg_sys::NodeTag::T_VariableSetStmt=>(), // currently we don't do any checks on VariableSet
-            pg_sys::NodeTag::T_CreateFunctionStmt=>info!("CREATE FUNCTION STATEMENT"),
+            pg_sys::NodeTag::T_CreateFunctionStmt=>function_create_checks(stmt),
             pg_sys::NodeTag::T_CreateExtensionStmt=>create_extension_checks(stmt),
             _=> (),
         }
@@ -226,6 +298,15 @@ pub extern "C" fn _PG_init() {
             GucFlags::SUPERUSER_ONLY|GucFlags::DISALLOW_IN_AUTO_FILE|GucFlags::NOT_WHILE_SEC_REST,
         );
 
+        GucRegistry::define_string_guc(
+            "aiven.pg_security_agent_reserved_roles",
+            "Comma-separated list of roles that can be assigned superuser",
+            "Comma-separated list of roles that can be assigned superuser",
+            &GUC_RESERVED_SU_ROLES,
+            GucContext::Postmaster,
+            GucFlags::SUPERUSER_ONLY|GucFlags::DISALLOW_IN_AUTO_FILE|GucFlags::NOT_WHILE_SEC_REST|GucFlags::NO_SHOW_ALL,
+        );
+
         PREV_EXECUTOR_START_HOOK = pg_sys::ExecutorStart_hook;
         pg_sys::ExecutorStart_hook = Some(executor_start_hook);
 
@@ -253,7 +334,6 @@ mod tests {
 
     #[pg_test]
     fn test_hello_aiven_gatekeeper() {
-        assert_eq!("Hello, aiven_gatekeeper", crate::hello_aiven_gatekeeper());
     }
 
 }

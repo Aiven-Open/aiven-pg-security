@@ -71,3 +71,13 @@ pub fn is_role_modify_allowed(in_strict_mode: bool) -> (bool, &'static str) {
 
     return (true, "");
 }
+
+pub fn is_allowed_superuser_role(role_name: String, reserved_roles: &str) -> bool {
+    let roles: std::str::Split<'_, &str> = reserved_roles.split(",");
+    for role in roles {
+        if role == role_name {
+            return true;
+        }
+    }
+    return false;
+}
