@@ -1,6 +1,6 @@
 
 use pgrx::pg_sys;
-
+use std::ffi::CString;
 use crate::{roles::{is_elevated, is_local_user_id_change}, is_security_restricted};
 
 const RESERVED_FUNCTION_NAMES: [&str; 11] = ["pg_read_file",
@@ -14,9 +14,6 @@ const RESERVED_FUNCTION_NAMES: [&str; 11] = ["pg_read_file",
                                             "be_lo_import",
                                             "be_lo_export",
                                             "be_lo_import_with_oid"];
-static mut RESERVED_FUNCTION_OIDS: Vec<pg_sys::Oid> = vec![];
-static mut MIN_RESERVED_OID: u32 = 9000;
-static mut MAX_RESERVED_OID: u32 = 0;
 
 pub fn is_function_language_allowed(lang_name: &str,in_strict_mode: bool ) -> bool  {
 
@@ -44,36 +41,35 @@ pub fn is_reserved_internal_function(func_name: &str) -> bool {
     return false;
 }
 
-pub fn is_reserved_internal_function_oid(func_oid: pg_sys::Oid) -> bool {
-    pg_sys::info!("OAT EXECUTE {}", func_oid);
-    unsafe {
-        if func_oid.as_u32() > MIN_RESERVED_OID && func_oid.as_u32() < MAX_RESERVED_OID {
-            pg_sys::info!("OAT EXECUTE {}", func_oid);
-            for r_oid in RESERVED_FUNCTION_OIDS.iter() {
-                if *r_oid == func_oid {
-                    return true;
-                }
+pub fn is_reserved_internal_function_oid(func_oid: pg_sys::Oid, min_reserved_oid: u32, max_reserved_oid: u32, reserved_function_oids: &Vec<pg_sys::Oid>) -> bool {
+    if func_oid.as_u32() > min_reserved_oid && func_oid.as_u32() < max_reserved_oid {
+        for r_oid in reserved_function_oids.iter() {
+            if *r_oid == func_oid {
+                return true;
             }
         }
     }
     return false;
 }
 
-// resolve reserved internal function oids
-pub fn resolve_internal_func_oids() {
-    pg_sys::info!("RESOLVE");
+// resolve reserved internal function oids and return min, max oids
+pub fn resolve_internal_func_oids(reserved_function_oids: &mut Vec<pg_sys::Oid>) -> (u32, u32) {
+    let mut min_reserved_oid: u32 = 9000;
+    let mut max_reserved_oid: u32 = 0;
+
     // map the reserved function names to oids
     for r_func in RESERVED_FUNCTION_NAMES {
+        let c_str = CString::new(r_func).unwrap();
         let oid:pg_sys::Oid = unsafe {
-            pg_sys::fmgr_internal_function(r_func.as_ptr().cast())
+            pg_sys::fmgr_internal_function(c_str.as_ptr() as *const i8)
         };
-        unsafe {
-            RESERVED_FUNCTION_OIDS.push(oid);
-            if oid.as_u32() < MIN_RESERVED_OID {
-                MIN_RESERVED_OID = oid.as_u32();
-            } else if oid.as_u32() > MAX_RESERVED_OID {
-                MAX_RESERVED_OID = oid.as_u32();
-            }
+        reserved_function_oids.push(oid);
+        if oid.as_u32() < min_reserved_oid {
+            min_reserved_oid = oid.as_u32();
+        }
+        if oid.as_u32() > max_reserved_oid {
+            max_reserved_oid = oid.as_u32();
         }
     }
+    return (min_reserved_oid, max_reserved_oid);
 }

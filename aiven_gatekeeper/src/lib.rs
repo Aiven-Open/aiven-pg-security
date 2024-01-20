@@ -1,8 +1,7 @@
 
 use std::ffi::CStr;
+use std::sync::Once;
 
-use functions::is_function_language_allowed;
-use functions::is_reserved_internal_function;
 use pgrx::pg_sys::superuser;
 use pgrx::prelude::*;
 use pgrx::GucRegistry;
@@ -10,18 +9,19 @@ use pgrx::GucFlags;
 use pgrx::GucSetting;
 use pgrx::GucContext;
 
-use roles::is_allowed_superuser_role;
-use roles::is_local_user_id_change;
-use roles::is_role_modify_allowed;
-use roles::is_restricted_role_or_grant;
-
 pgrx::pg_module_magic!();
 
 mod roles;
 mod functions;
-use crate::functions::is_reserved_internal_function_oid;
-use crate::functions::resolve_internal_func_oids;
-use crate::roles::is_elevated;
+use functions::is_reserved_internal_function_oid;
+use functions::resolve_internal_func_oids;
+use functions::is_function_language_allowed;
+use functions::is_reserved_internal_function;
+use roles::is_elevated;
+use roles::is_allowed_superuser_role;
+use roles::is_local_user_id_change;
+use roles::is_role_modify_allowed;
+use roles::is_restricted_role_or_grant;
 
 static mut PREV_PROCESS_UTILITY_HOOK: pg_sys::ProcessUtility_hook_type = None;
 static mut PREV_EXECUTOR_START_HOOK: pg_sys::ExecutorStart_hook_type = None;
@@ -33,6 +33,10 @@ static GUC_RESERVED_SU_ROLES: GucSetting<Option<&'static CStr>> =
                 CStr::from_bytes_with_nul_unchecked(b"postgres\0")
             }));
 const OAT_FUNCTION_EXECUTE:u32 = 4; // pgrx doesn't have the enum type for ObjectAccessType
+static mut RESERVED_BUILTIN_OIDS: Vec<pg_sys::Oid> = vec![];
+static mut MIN_RESERVED_OID: u32 = 9000;
+static mut MAX_RESERVED_OID: u32 = 0;
+static INIT_RESERVED_OIDS: Once = Once::new();
 
 // pgrx doesn't compile the extension correctly if I don't set this macro
 // on atleast one function
@@ -287,18 +291,15 @@ extern "C" fn object_access_hook(
 ) {
     // only if the agent is enabled and this prior to the execution of a function
     if is_agent_enabled() && access == OAT_FUNCTION_EXECUTE {
-        info!("OAT EXECUTE");
         // check object access restrictions
-        if is_reserved_internal_function_oid(object_id){
+        let (min_oid, max_oid, reserved_oids) = get_cached_builtin_oids();
+        if is_reserved_internal_function_oid(object_id, min_oid, max_oid, &reserved_oids){
 
             if is_strict_mode_enabled() || is_elevated() || is_security_restricted() || is_local_user_id_change() {
-                // get friendly name
-                let fn_name = "reserved func";
-                pg_sys::error!("using builtin function {} is not allowed", fn_name);
+                pg_sys::error!("use of sensitive builtin function not allowed");
             }
             if !unsafe{superuser()} {
-                let fn_name = "reserved_func";
-                pg_sys::error!("using builtin function {} is not allowed by non-superusers", fn_name);
+                pg_sys::error!("use of sensitive builtin function not allowed");
             }
         }
     }
@@ -312,6 +313,15 @@ extern "C" fn object_access_hook(
         // as the C version of gatekeeper and is because there is no standard_ObjectAccess function
         // like there is for standard_ProcessUtility etc
     }
+}
+
+fn get_cached_builtin_oids() -> (u32, u32, &'static mut Vec<pg_sys::Oid>) {
+  unsafe {
+      INIT_RESERVED_OIDS.call_once(|| {
+        (MIN_RESERVED_OID, MAX_RESERVED_OID) = resolve_internal_func_oids(&mut RESERVED_BUILTIN_OIDS);
+      });
+      (MIN_RESERVED_OID, MAX_RESERVED_OID, &mut RESERVED_BUILTIN_OIDS)
+  }
 }
 
 #[pg_guard]
@@ -348,8 +358,6 @@ pub extern "C" fn _PG_init() {
             GucContext::Postmaster,
             GucFlags::SUPERUSER_ONLY|GucFlags::DISALLOW_IN_AUTO_FILE|GucFlags::NOT_WHILE_SEC_REST|GucFlags::NO_SHOW_ALL,
         );
-
-        resolve_internal_func_oids();
 
         PREV_EXECUTOR_START_HOOK = pg_sys::ExecutorStart_hook;
         pg_sys::ExecutorStart_hook = Some(executor_start_hook);
