@@ -45,8 +45,13 @@ fn is_true() -> bool {
     return true;
 }
 
+fn _is_background_worker() -> bool {
+    return unsafe {pg_sys::IsBackgroundWorker};
+}
+
 fn is_security_restricted() -> bool {
-    return unsafe {pg_sys::InSecurityRestrictedOperation()};
+    // don't allow security sensitive operations in security restricted or background workers
+    return unsafe {pg_sys::InSecurityRestrictedOperation() || pg_sys::IsBackgroundWorker}; 
 }
 
 fn is_strict_mode_enabled() -> bool {
