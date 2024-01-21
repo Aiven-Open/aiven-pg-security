@@ -2,6 +2,7 @@
 use std::ffi::CStr;
 use std::sync::Once;
 
+use functions::num_reserved_func_names;
 use pgrx::pg_sys::superuser;
 use pgrx::prelude::*;
 use pgrx::GucRegistry;
@@ -335,6 +336,8 @@ extern "C" fn object_access_hook(
 fn get_cached_builtin_oids() -> (u32, u32, &'static mut Vec<pg_sys::Oid>) {
   unsafe {
       INIT_RESERVED_OIDS.call_once(|| {
+        // initialize the vector with capacity to match RESERVED_FUNCTION_NAMES to reduce allocations
+        RESERVED_BUILTIN_OIDS = Vec::with_capacity(num_reserved_func_names());
         (MIN_RESERVED_OID, MAX_RESERVED_OID) = resolve_internal_func_oids(&mut RESERVED_BUILTIN_OIDS);
       });
       (MIN_RESERVED_OID, MAX_RESERVED_OID, &mut RESERVED_BUILTIN_OIDS)

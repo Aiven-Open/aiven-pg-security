@@ -15,6 +15,10 @@ const RESERVED_FUNCTION_NAMES: [&str; 11] = ["pg_read_file",
                                             "be_lo_export",
                                             "be_lo_import_with_oid"];
 
+pub fn num_reserved_func_names() -> usize {
+    return RESERVED_FUNCTION_NAMES.len();
+}
+
 pub fn is_function_language_allowed(in_strict_mode: bool ) -> Result<bool, &'static str>  {
 
     if in_strict_mode || 
