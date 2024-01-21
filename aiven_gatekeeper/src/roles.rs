@@ -56,19 +56,19 @@ pub fn is_elevated() -> bool {
     }
 }
 
-pub fn is_role_modify_allowed(in_strict_mode: bool) -> bool {
+pub fn is_role_modify_allowed(in_strict_mode: bool) -> Result<bool, &'static str> {
     if in_strict_mode || is_elevated() {
-        pg_sys::error!("ROLE modification to SUPERUSER/privileged role not allowed");
+        return Err("ROLE modification to SUPERUSER/privileged role not allowed");
     }
 
     if is_security_restricted() {
-        pg_sys::error!("ROLE modification to SUPERUSER/privileged role not allowed in SECURITY_RESTRICTED_OPERATION");
+        return Err("ROLE modification to SUPERUSER/privileged role not allowed in SECURITY_RESTRICTED_OPERATION");
     }
 
     if is_local_user_id_change() {
-        pg_sys::error!("ROLE modification to SUPERUSER/privileged role not allowed in extensions");
+        return Err("ROLE modification to SUPERUSER/privileged role not allowed in extensions");
     }
-    return true;
+    return Ok(true);
 }
 
 pub fn is_allowed_superuser_role(role_name: &str, reserved_roles: &str) -> bool {

@@ -117,7 +117,9 @@ fn create_role_checks(stmt: *mut pg_sys::Node) {
             }
             // check if we are setting superuser true
             if option_name == "superuser" && pg_sys::defGetBoolean(option.as_ptr()) {
-                is_role_modify_allowed(is_strict_mode_enabled());
+                if let Err(e) = is_role_modify_allowed(is_strict_mode_enabled()){
+                    pg_sys::error!("{}",e);
+                };
             }
         }
     }
@@ -132,7 +134,9 @@ fn alter_role_checks(stmt: *mut pg_sys::Node) {
         // check we aren't altering a reserved role (existing superuser)
         let role_oid = pg_sys::get_rolespec_oid(alter_role_stmt.role, true);
         if is_restricted_role_or_grant(role_oid){
-            is_role_modify_allowed(is_strict_mode_enabled());
+            if let Err(e) = is_role_modify_allowed(is_strict_mode_enabled()){
+                pg_sys::error!("{}",e);
+            };
         }
 
         let options_lst = pgrx::PgList::from_pg(alter_role_stmt.options);
@@ -147,7 +151,9 @@ fn alter_role_checks(stmt: *mut pg_sys::Node) {
             }
             // check if we are setting superuser true
             if option_name == "superuser" && pg_sys::defGetBoolean(option.as_ptr()) {
-                is_role_modify_allowed(is_strict_mode_enabled());
+                if let Err(e) = is_role_modify_allowed(is_strict_mode_enabled()){
+                    pg_sys::error!("{}",e);
+                };
             }
         }
     }
@@ -166,7 +172,9 @@ fn grant_role_checks(stmt: *mut pg_sys::Node) {
             //let priv_name = std::ffi::CStr::from_ptr(access_privilege.priv_name).to_string_lossy().into_owned();
             let roloid : pg_sys::Oid = pg_sys::get_role_oid(access_privilege.priv_name, false);
             if is_restricted_role_or_grant(roloid) {
-                is_role_modify_allowed(is_strict_mode_enabled());
+                if let Err(e) = is_role_modify_allowed(is_strict_mode_enabled()){
+                    pg_sys::error!("{}",e);
+                };
             }
         }
     }
@@ -189,7 +197,12 @@ fn function_create_checks(stmt: *mut pg_sys::Node) {
 
                 let lang_name: &str = std::ffi::CStr::from_ptr(pg_sys::defGetString(option.as_ptr())).to_str().unwrap();
                 check_body = match lang_name {
-                    "plperlu"|"plpythonu"=>is_function_language_allowed(lang_name,is_strict_mode_enabled()) && false, // we don't need to check the body, only that the language isn't allowed
+                    "plperlu"|"plpythonu"=>{
+                        if let Err(e) = is_function_language_allowed(is_strict_mode_enabled()){
+                            pg_sys::error!("{} - {}",e, lang_name);
+                        }
+                        false // we don't need to check the body, only that the language isn't allowed
+                    },
                     "internal"=> is_strict_mode_enabled() || is_elevated() || is_security_restricted() || is_local_user_id_change(),
                     _ => false,
                 };
@@ -293,13 +306,12 @@ extern "C" fn object_access_hook(
     if is_agent_enabled() && access == OAT_FUNCTION_EXECUTE {
         // check object access restrictions
         let (min_oid, max_oid, reserved_oids) = get_cached_builtin_oids();
-        if is_reserved_internal_function_oid(object_id, min_oid, max_oid, &reserved_oids){
-
+        if let Ok(fname) = is_reserved_internal_function_oid(object_id, min_oid, max_oid, &reserved_oids){
             if is_strict_mode_enabled() || is_elevated() || is_security_restricted() || is_local_user_id_change() {
-                pg_sys::error!("use of sensitive builtin function not allowed");
+                pg_sys::error!("using builtin function {} is not allowed", fname);
             }
-            if !unsafe{superuser()} {
-                pg_sys::error!("use of sensitive builtin function not allowed");
+            if  !unsafe{superuser()}{
+                pg_sys::error!("using builtin function {} is not allowed", fname);
             }
         }
     }
