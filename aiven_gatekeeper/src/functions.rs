@@ -85,5 +85,7 @@ pub fn resolve_internal_func_oids(reserved_function_oids: &mut Vec<pg_sys::Oid>)
             max_reserved_oid = oid.as_u32();
         }
     }
+    // sort to allow for faster search
+    reserved_function_oids.sort_by(|a,b| (a.as_u32()).cmp(&(b.as_u32())));
     return (min_reserved_oid, max_reserved_oid);
 }
