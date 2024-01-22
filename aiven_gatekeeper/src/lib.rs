@@ -316,8 +316,14 @@ extern "C" fn object_access_hook(
             if is_strict_mode_enabled() || is_elevated() || is_security_restricted() || is_local_user_id_change() {
                 pg_sys::error!("using builtin function {} is not allowed", fname);
             }
+            /* extra check, this is to enforce only superuser can call this function in normal
+            * context. Otherwise PG uses the grant system, which could lead to roles being
+            * granted execute privilege on the funcion and still being able to call it.
+            * This is not too serious, since non-superusers can't read outside reserved paths (for example)
+            * but rather be strict.
+            */
             if  !unsafe{superuser()}{
-                pg_sys::error!("using builtin function {} is not allowed", fname);
+                pg_sys::error!("using builtin function {} is not allowed by non-superusers", fname);
             }
         }
     }
