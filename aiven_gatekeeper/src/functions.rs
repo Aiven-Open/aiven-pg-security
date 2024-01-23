@@ -15,13 +15,18 @@ const RESERVED_FUNCTION_NAMES: [&str; 11] = ["pg_read_file",
                                             "be_lo_export",
                                             "be_lo_import_with_oid"];
 
+const RESERVED_SO_PATHS: [&str; 4] = ["file_fdw",
+                                      "file_fdw.so",
+                                      "plperl",
+                                      "plperl.so"];
+
 pub fn num_reserved_func_names() -> usize {
     return RESERVED_FUNCTION_NAMES.len();
 }
 
 pub fn is_function_language_allowed(in_strict_mode: bool ) -> Result<bool, &'static str>  {
 
-    if in_strict_mode || 
+    if in_strict_mode ||
         is_elevated() ||
         is_security_restricted() ||
         is_local_user_id_change()  {
@@ -88,4 +93,13 @@ pub fn resolve_internal_func_oids(reserved_function_oids: &mut Vec<pg_sys::Oid>)
     // sort to allow for faster search
     reserved_function_oids.sort_by(|a,b| (a.as_u32()).cmp(&(b.as_u32())));
     return (min_reserved_oid, max_reserved_oid);
+}
+
+pub fn is_reserved_so(so_path: &str) -> bool {
+    for r_so in RESERVED_SO_PATHS {
+        if so_path.ends_with(r_so) {
+            return true;
+        }
+    }
+    false
 }

@@ -2,6 +2,7 @@
 use std::ffi::CStr;
 use std::sync::Once;
 
+use functions::is_reserved_so;
 use functions::num_reserved_func_names;
 use pgrx::pg_sys::superuser;
 use pgrx::prelude::*;
@@ -34,7 +35,7 @@ static GUC_RESERVED_SU_ROLES: GucSetting<Option<&'static CStr>> =
                 CStr::from_bytes_with_nul_unchecked(b"postgres\0")
             }));
 const OAT_FUNCTION_EXECUTE:u32 = 4; // pgrx doesn't have the enum type for ObjectAccessType
-static mut RESERVED_BUILTIN_OIDS: Vec<pg_sys::Oid> = vec![];
+static mut RESERVED_BUILTIN_OIDS: Vec<pg_sys::Oid> = vec![]; // this could be a Vec<(Oid, &str)> or a HashMap but there is minimal value in storing functions::RESERVED_FUNCTION_NAMES here to
 static mut MIN_RESERVED_OID: u32 = 9000;
 static mut MAX_RESERVED_OID: u32 = 0;
 static INIT_RESERVED_OIDS: Once = Once::new();
@@ -52,7 +53,7 @@ fn _is_background_worker() -> bool {
 
 fn is_security_restricted() -> bool {
     // don't allow security sensitive operations in security restricted or background workers
-    return unsafe {pg_sys::InSecurityRestrictedOperation() || pg_sys::IsBackgroundWorker}; 
+    return unsafe {pg_sys::InSecurityRestrictedOperation() || pg_sys::IsBackgroundWorker};
 }
 
 fn is_strict_mode_enabled() -> bool {
@@ -209,7 +210,7 @@ fn function_create_checks(stmt: *mut pg_sys::Node) {
                         }
                         false // we don't need to check the body, only that the language isn't allowed
                     },
-                    "internal"=> is_strict_mode_enabled() || is_elevated() || is_security_restricted() || is_local_user_id_change(),
+                    "internal"|"c"=> is_strict_mode_enabled() || is_elevated() || is_security_restricted() || is_local_user_id_change(),
                     _ => false,
                 };
             }
@@ -223,6 +224,10 @@ fn function_create_checks(stmt: *mut pg_sys::Node) {
             let sql_body: &str = std::ffi::CStr::from_ptr(sql_body_ptr).to_str().unwrap();
             if is_reserved_internal_function(sql_body){
                 pg_sys::error!("using builtin function {} is not allowed", sql_body);
+            }
+            // in the case of C functions, we wan't to check the path it is being created from
+            if is_reserved_so(sql_body) {
+                pg_sys::error!("using c function from {} is not allowed", sql_body);
             }
         }
     }
