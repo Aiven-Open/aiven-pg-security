@@ -195,7 +195,17 @@ fn function_create_checks(stmt: *mut pg_sys::Node) {
 
     unsafe {
         create_func_stmt = PgBox::from_pg(stmt as *mut pg_sys::CreateFunctionStmt);
-        let options_lst = pgrx::PgList::from_pg(create_func_stmt.options);
+        let options_lst: pgrx::PgList<pg_sys::DefElem> = pgrx::PgList::from_pg(create_func_stmt.options);
+
+        // check return_type, this is the cheapest check, so do it first
+        let type_name: PgBox<pg_sys::TypeName> = PgBox::from_pg(create_func_stmt.returnType as *mut pg_sys::TypeName);
+        let names_list = pgrx::pg_sys::NameListToString(type_name.names);
+        if let Ok(return_type) = std::ffi::CStr::from_ptr(names_list).to_str() {
+            if return_type == "language_handler" {
+                pg_sys::error!("custom language_handler not allowed");
+            }
+        }
+
         for opt_raw in options_lst.iter_ptr() {
             option = PgBox::from_pg(opt_raw as *mut pg_sys::DefElem);
             let option_name = std::ffi::CStr::from_ptr(option.defname).to_str().unwrap();
