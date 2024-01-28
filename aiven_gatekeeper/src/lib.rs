@@ -95,96 +95,92 @@ fn copy_stmt_checks(stmt: *mut pg_sys::Node) {
 
 fn create_extension_checks(stmt: *mut pg_sys::Node) {
     // get extension statement and name of extension
-    let create_ext_stmt: PgBox<pg_sys::CreateExtensionStmt>;
-    let extname: String;
-    unsafe {
-        create_ext_stmt = PgBox::from_pg(stmt as *mut pg_sys::CreateExtensionStmt);
-        extname= std::ffi::CStr::from_ptr(create_ext_stmt.extname).to_string_lossy().into_owned();
-    }
-    // check if disallowed extension
-    if extname == "file_fdw" { // error and abort the current transaction if disallowed extension
-        pg_sys::error!("{} extension not allowed", extname);
+    
+    let create_ext_stmt: PgBox<pg_sys::CreateExtensionStmt> = unsafe {PgBox::from_pg(stmt as *mut pg_sys::CreateExtensionStmt)};
+    if let Ok(extname) = unsafe { std::ffi::CStr::from_ptr(create_ext_stmt.extname).to_str()}{
+        // check if disallowed extension
+        if extname == "file_fdw" { // error and abort the current transaction if disallowed extension
+            pg_sys::error!("{} extension not allowed", extname);
+        }
     }
 }
 
 fn create_role_checks(stmt: *mut pg_sys::Node) {
     let create_role_stmt: PgBox<pg_sys::CreateRoleStmt>;
     let mut option: PgBox<pg_sys::DefElem>;
-    unsafe {
-        create_role_stmt = PgBox::from_pg(stmt as *mut pg_sys::CreateRoleStmt);
-        let options_lst = pgrx::PgList::from_pg(create_role_stmt.options);
-        for opt_raw in options_lst.iter_ptr() {
-            option = PgBox::from_pg(opt_raw as *mut pg_sys::DefElem);
-            let option_name = std::ffi::CStr::from_ptr(option.defname).to_string_lossy().into_owned();
-
+    
+    create_role_stmt = unsafe {PgBox::from_pg(stmt as *mut pg_sys::CreateRoleStmt)};
+    let options_lst = unsafe {pgrx::PgList::from_pg(create_role_stmt.options)};
+    for opt_raw in options_lst.iter_ptr() {
+        option = unsafe {PgBox::from_pg(opt_raw as *mut pg_sys::DefElem)};
+        if let Ok(option_name) = unsafe {std::ffi::CStr::from_ptr(option.defname).to_str()}{
             // check if role is allowed to be a superuser, is in GUC_RESERVED_SU_ROLES
-            let role_name: &str = std::ffi::CStr::from_ptr(create_role_stmt.role).to_str().unwrap();
-            if is_allowed_superuser_role(role_name, GUC_RESERVED_SU_ROLES.get().unwrap().to_str().unwrap()) == false {
-                pg_sys::error!("Role {} not in permitted superuser list", role_name)
-            }
-            // check if we are setting superuser true
-            if option_name == "superuser" && pg_sys::defGetBoolean(option.as_ptr()) {
-                if let Err(e) = is_role_modify_allowed(is_strict_mode_enabled()){
-                    pg_sys::error!("{}",e);
-                };
+            if let Ok(role_name) = unsafe {std::ffi::CStr::from_ptr(create_role_stmt.role).to_str()}{
+                if is_allowed_superuser_role(role_name, GUC_RESERVED_SU_ROLES.get().unwrap().to_str().unwrap()) == false {
+                    pg_sys::error!("Role {} not in permitted superuser list", role_name)
+                }
+                // check if we are setting superuser true
+                if option_name == "superuser" && unsafe { pg_sys::defGetBoolean(option.as_ptr()) }{
+                    if let Err(e) = is_role_modify_allowed(is_strict_mode_enabled()){
+                        pg_sys::error!("{}",e);
+                    };
+                }
             }
         }
     }
-
 }
 
 fn alter_role_checks(stmt: *mut pg_sys::Node) {
     let alter_role_stmt: PgBox<pg_sys::AlterRoleStmt>;
     let mut option: PgBox<pg_sys::DefElem>;
-    unsafe {
-        alter_role_stmt = PgBox::from_pg(stmt as *mut pg_sys::AlterRoleStmt);
+    
+        alter_role_stmt = unsafe {PgBox::from_pg(stmt as *mut pg_sys::AlterRoleStmt)};
         // check we aren't altering a reserved role (existing superuser)
-        let role_oid = pg_sys::get_rolespec_oid(alter_role_stmt.role, true);
+        let role_oid = unsafe {pg_sys::get_rolespec_oid(alter_role_stmt.role, true)};
         if is_restricted_role_or_grant(role_oid){
             if let Err(e) = is_role_modify_allowed(is_strict_mode_enabled()){
                 pg_sys::error!("{}",e);
             };
         }
 
-        let options_lst = pgrx::PgList::from_pg(alter_role_stmt.options);
+        let options_lst = unsafe {pgrx::PgList::from_pg(alter_role_stmt.options)};
         for opt_raw in options_lst.iter_ptr() {
-            option = PgBox::from_pg(opt_raw as *mut pg_sys::DefElem);
-            let option_name = std::ffi::CStr::from_ptr(option.defname).to_string_lossy().into_owned();
-
-            // check if role is allowed to be a superuser, is in GUC_RESERVED_SU_ROLES
-            let role_name: &str= std::ffi::CStr::from_ptr((*alter_role_stmt.role).rolename).to_str().unwrap();
-            if is_allowed_superuser_role(role_name, GUC_RESERVED_SU_ROLES.get().unwrap().to_str().unwrap()) == false {
-                pg_sys::error!("Role {} not in permitted superuser list", role_name)
-            }
-            // check if we are setting superuser true
-            if option_name == "superuser" && pg_sys::defGetBoolean(option.as_ptr()) {
-                if let Err(e) = is_role_modify_allowed(is_strict_mode_enabled()){
-                    pg_sys::error!("{}",e);
-                };
-            }
+            option = unsafe {PgBox::from_pg(opt_raw as *mut pg_sys::DefElem)};
+            if let Ok(option_name) = unsafe {std::ffi::CStr::from_ptr(option.defname).to_str()}{
+                // check if role is allowed to be a superuser, is in GUC_RESERVED_SU_ROLES
+                if let Ok(role_name) = unsafe {std::ffi::CStr::from_ptr((*alter_role_stmt.role).rolename).to_str()}{
+                    if is_allowed_superuser_role(role_name, GUC_RESERVED_SU_ROLES.get().unwrap().to_str().unwrap()) == false {
+                        pg_sys::error!("Role {} not in permitted superuser list", role_name)
+                    }
+                }
+                // check if we are setting superuser true
+                if option_name == "superuser" && unsafe {pg_sys::defGetBoolean(option.as_ptr())} {
+                    if let Err(e) = is_role_modify_allowed(is_strict_mode_enabled()){
+                        pg_sys::error!("{}",e);
+                    };
+                }
         }
     }
-
 }
 
 fn grant_role_checks(stmt: *mut pg_sys::Node) {
     let grant_role_stmt: PgBox<pg_sys::GrantRoleStmt>;
     let mut access_privilege: PgBox<pg_sys::AccessPriv>;
 
-    unsafe {
-        grant_role_stmt = PgBox::from_pg(stmt as *mut pg_sys::GrantRoleStmt);
-        let lst = pgrx::PgList::from_pg(grant_role_stmt.granted_roles);
+    
+        grant_role_stmt = unsafe {PgBox::from_pg(stmt as *mut pg_sys::GrantRoleStmt)};
+        let lst = unsafe {pgrx::PgList::from_pg(grant_role_stmt.granted_roles)};
         for granted_role in lst.iter_ptr() {
-            access_privilege = PgBox::from_pg(granted_role as *mut pg_sys::AccessPriv);
+            access_privilege = unsafe {PgBox::from_pg(granted_role as *mut pg_sys::AccessPriv)};
             //let priv_name = std::ffi::CStr::from_ptr(access_privilege.priv_name).to_string_lossy().into_owned();
-            let roloid : pg_sys::Oid = pg_sys::get_role_oid(access_privilege.priv_name, false);
+            let roloid : pg_sys::Oid = unsafe {pg_sys::get_role_oid(access_privilege.priv_name, false)};
             if is_restricted_role_or_grant(roloid) {
                 if let Err(e) = is_role_modify_allowed(is_strict_mode_enabled()){
                     pg_sys::error!("{}",e);
                 };
             }
         }
-    }
+    
 }
 
 fn function_create_checks(stmt: *mut pg_sys::Node) {
@@ -193,55 +189,55 @@ fn function_create_checks(stmt: *mut pg_sys::Node) {
     let mut option: PgBox<pg_sys::DefElem>;
     let mut sql_body_ptr: *mut i8 = std::ptr::null_mut();
 
-    unsafe {
-        create_func_stmt = PgBox::from_pg(stmt as *mut pg_sys::CreateFunctionStmt);
-        let options_lst: pgrx::PgList<pg_sys::DefElem> = pgrx::PgList::from_pg(create_func_stmt.options);
+    create_func_stmt = unsafe { PgBox::from_pg(stmt as *mut pg_sys::CreateFunctionStmt) };
+    let options_lst: pgrx::PgList<pg_sys::DefElem> = unsafe {pgrx::PgList::from_pg(create_func_stmt.options)};
 
-        // check return_type, this is the cheapest check, so do it first
-        let type_name: PgBox<pg_sys::TypeName> = PgBox::from_pg(create_func_stmt.returnType as *mut pg_sys::TypeName);
-        let names_list = pgrx::pg_sys::NameListToString(type_name.names);
-        if let Ok(return_type) = std::ffi::CStr::from_ptr(names_list).to_str() {
-            if return_type == "language_handler" {
-                pg_sys::error!("custom language_handler not allowed");
-            }
+    // check return_type, this is the cheapest check, so do it first
+    let type_name: PgBox<pg_sys::TypeName> = unsafe {PgBox::from_pg(create_func_stmt.returnType as *mut pg_sys::TypeName)};
+    let names_list = unsafe {pgrx::pg_sys::NameListToString(type_name.names)};
+    if let Ok(return_type) = unsafe {std::ffi::CStr::from_ptr(names_list).to_str() }{
+        if return_type == "language_handler" {
+            pg_sys::error!("custom language_handler not allowed");
         }
+    }
 
-        for opt_raw in options_lst.iter_ptr() {
-            option = PgBox::from_pg(opt_raw as *mut pg_sys::DefElem);
-            let option_name = std::ffi::CStr::from_ptr(option.defname).to_str().unwrap();
+    for opt_raw in options_lst.iter_ptr() {
+        option = unsafe {PgBox::from_pg(opt_raw as *mut pg_sys::DefElem)};
+        if let Ok(option_name) = unsafe {std::ffi::CStr::from_ptr(option.defname).to_str()} {
             // creating a function with specific language
             if option_name == "language" {
-
-                let lang_name: &str = std::ffi::CStr::from_ptr(pg_sys::defGetString(option.as_ptr())).to_str().unwrap();
-                check_body = match lang_name {
-                    "plperlu"|"plpythonu"=>{
-                        if let Err(e) = is_function_language_allowed(is_strict_mode_enabled()){
-                            pg_sys::error!("{} - {}",e, lang_name);
-                        }
-                        false // we don't need to check the body, only that the language isn't allowed
-                    },
-                    "internal"|"c"=> is_strict_mode_enabled() || is_elevated() || is_security_restricted() || is_local_user_id_change(),
-                    _ => false,
-                };
+                if let Ok(lang_name) = unsafe {std::ffi::CStr::from_ptr(pg_sys::defGetString(option.as_ptr())).to_str()} {
+                    check_body = match lang_name {
+                        "plperlu"|"plpythonu"=>{
+                            if let Err(e) = is_function_language_allowed(is_strict_mode_enabled()){
+                                pg_sys::error!("{} - {}",e, lang_name);
+                            }
+                            false // we don't need to check the body, only that the language isn't allowed
+                        },
+                        "internal"|"c"=> is_strict_mode_enabled() || is_elevated() || is_security_restricted() || is_local_user_id_change(),
+                        _ => false,
+                    };
+                }
             }
             // extract the sql body
             if option_name == "as" {
                 // get a pointer to the sql_body
-                sql_body_ptr = pg_sys::defGetString(option.as_ptr());
-            }
-        }
-        if check_body { // check if a reserved function
-            let sql_body: &str = std::ffi::CStr::from_ptr(sql_body_ptr).to_str().unwrap();
-            if is_reserved_internal_function(sql_body){
-                pg_sys::error!("using builtin function {} is not allowed", sql_body);
-            }
-            // in the case of C functions, we wan't to check the path it is being created from
-            if is_reserved_so(sql_body) {
-                pg_sys::error!("using c function from {} is not allowed", sql_body);
+                sql_body_ptr = unsafe {pg_sys::defGetString(option.as_ptr())};
             }
         }
     }
+    if check_body { // check if a reserved function
+        let sql_body: &str = unsafe {std::ffi::CStr::from_ptr(sql_body_ptr).to_str().unwrap()};
+        if is_reserved_internal_function(sql_body){
+            pg_sys::error!("using builtin function {} is not allowed", sql_body);
+        }
+        // in the case of C functions, we wan't to check the path it is being created from
+        if is_reserved_so(sql_body) {
+            pg_sys::error!("using c function from {} is not allowed", sql_body);
+        }
+    }
 }
+
 
 #[pg_guard]
 extern "C" fn executor_start_hook(query_desc: *mut pg_sys::QueryDesc, eflags: i32) {
@@ -367,12 +363,12 @@ fn get_cached_builtin_oids() -> (u32, u32, &'static mut Vec<pg_sys::Oid>) {
 
 #[pg_guard]
 pub extern "C" fn _PG_init() {
-    unsafe {
+    
         // must be loaded as a shared_library
-        if !pg_sys::process_shared_preload_libraries_in_progress {
+        if unsafe { !pg_sys::process_shared_preload_libraries_in_progress }{
             error!("aiven_pg_gatekeeper is not in shared_preload_libraries");
         }
-
+    
         GucRegistry::define_bool_guc(
             "aiven.pg_security_agent",
             "Toggle the security agent checks on and off",
@@ -400,6 +396,7 @@ pub extern "C" fn _PG_init() {
             GucFlags::SUPERUSER_ONLY|GucFlags::DISALLOW_IN_AUTO_FILE|GucFlags::NOT_WHILE_SEC_REST|GucFlags::NO_SHOW_ALL,
         );
 
+    unsafe {
         PREV_EXECUTOR_START_HOOK = pg_sys::ExecutorStart_hook;
         pg_sys::ExecutorStart_hook = Some(executor_start_hook);
 
