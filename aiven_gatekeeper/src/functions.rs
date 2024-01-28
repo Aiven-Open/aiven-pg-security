@@ -61,7 +61,7 @@ pub fn is_reserved_internal_function_oid(func_oid: pg_sys::Oid, min_reserved_oid
 
 fn get_reserved_func_name_from_oid(func_oid: pg_sys::Oid) -> Result<&'static str, &'static str> {
     for r_func_name in RESERVED_FUNCTION_NAMES {
-        let c_str = CString::new(r_func_name).unwrap();
+        let c_str: CString = CString::new(r_func_name).unwrap();
         let oid:pg_sys::Oid = unsafe {
             pg_sys::fmgr_internal_function(c_str.as_ptr() as *const i8)
         };

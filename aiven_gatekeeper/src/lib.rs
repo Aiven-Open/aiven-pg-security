@@ -137,14 +137,14 @@ fn alter_role_checks(stmt: *mut pg_sys::Node) {
     
     alter_role_stmt = unsafe {PgBox::from_pg(stmt as *mut pg_sys::AlterRoleStmt)};
     // check we aren't altering a reserved role (existing superuser)
-    let role_oid = unsafe {pg_sys::get_rolespec_oid(alter_role_stmt.role, true)};
+    let role_oid: pg_sys::Oid = unsafe {pg_sys::get_rolespec_oid(alter_role_stmt.role, true)};
     if is_restricted_role_or_grant(role_oid){
         if let Err(e) = is_role_modify_allowed(is_strict_mode_enabled()){
             pg_sys::error!("{}",e);
         };
     }
 
-    let options_lst = unsafe {pgrx::PgList::from_pg(alter_role_stmt.options)};
+    let options_lst: pgrx::PgList<pg_sys::DefElem> = unsafe {pgrx::PgList::from_pg(alter_role_stmt.options)};
     for opt_raw in options_lst.iter_ptr() {
         option = unsafe {PgBox::from_pg(opt_raw as *mut pg_sys::DefElem)};
         if let Ok(option_name) = util::to_cstr(option.defname){
@@ -166,7 +166,7 @@ fn alter_role_checks(stmt: *mut pg_sys::Node) {
 
 fn grant_role_checks(stmt: *mut pg_sys::Node) {
     let grant_role_stmt: PgBox<pg_sys::GrantRoleStmt> = unsafe {PgBox::from_pg(stmt as *mut pg_sys::GrantRoleStmt)};
-    let lst = unsafe {pgrx::PgList::from_pg(grant_role_stmt.granted_roles)};
+    let lst: pgrx::PgList<pg_sys::AccessPriv> = unsafe {pgrx::PgList::from_pg(grant_role_stmt.granted_roles)};
     for granted_role in lst.iter_ptr() {
         let mut access_privilege: PgBox<pg_sys::AccessPriv> = unsafe {PgBox::from_pg(granted_role as *mut pg_sys::AccessPriv)};
         //let priv_name = std::ffi::CStr::from_ptr(access_privilege.priv_name).to_string_lossy().into_owned();
