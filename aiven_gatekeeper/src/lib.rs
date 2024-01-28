@@ -15,6 +15,7 @@ pgrx::pg_module_magic!();
 
 mod roles;
 mod functions;
+mod util; 
 use functions::is_reserved_internal_function_oid;
 use functions::resolve_internal_func_oids;
 use functions::is_function_language_allowed;
@@ -113,9 +114,9 @@ fn create_role_checks(stmt: *mut pg_sys::Node) {
     let options_lst = unsafe {pgrx::PgList::from_pg(create_role_stmt.options)};
     for opt_raw in options_lst.iter_ptr() {
         option = unsafe {PgBox::from_pg(opt_raw as *mut pg_sys::DefElem)};
-        if let Ok(option_name) = unsafe {std::ffi::CStr::from_ptr(option.defname).to_str()}{
+        if let Ok(option_name) =  util::to_cstr(option.defname){
             // check if role is allowed to be a superuser, is in GUC_RESERVED_SU_ROLES
-            if let Ok(role_name) = unsafe {std::ffi::CStr::from_ptr(create_role_stmt.role).to_str()}{
+            if let Ok(role_name) = util::to_cstr(create_role_stmt.role) {
                 if is_allowed_superuser_role(role_name, GUC_RESERVED_SU_ROLES.get().unwrap().to_str().unwrap()) == false {
                     pg_sys::error!("Role {} not in permitted superuser list", role_name)
                 }
@@ -134,53 +135,48 @@ fn alter_role_checks(stmt: *mut pg_sys::Node) {
     let alter_role_stmt: PgBox<pg_sys::AlterRoleStmt>;
     let mut option: PgBox<pg_sys::DefElem>;
     
-        alter_role_stmt = unsafe {PgBox::from_pg(stmt as *mut pg_sys::AlterRoleStmt)};
-        // check we aren't altering a reserved role (existing superuser)
-        let role_oid = unsafe {pg_sys::get_rolespec_oid(alter_role_stmt.role, true)};
-        if is_restricted_role_or_grant(role_oid){
-            if let Err(e) = is_role_modify_allowed(is_strict_mode_enabled()){
-                pg_sys::error!("{}",e);
-            };
-        }
-
-        let options_lst = unsafe {pgrx::PgList::from_pg(alter_role_stmt.options)};
-        for opt_raw in options_lst.iter_ptr() {
-            option = unsafe {PgBox::from_pg(opt_raw as *mut pg_sys::DefElem)};
-            if let Ok(option_name) = unsafe {std::ffi::CStr::from_ptr(option.defname).to_str()}{
-                // check if role is allowed to be a superuser, is in GUC_RESERVED_SU_ROLES
-                if let Ok(role_name) = unsafe {std::ffi::CStr::from_ptr((*alter_role_stmt.role).rolename).to_str()}{
-                    if is_allowed_superuser_role(role_name, GUC_RESERVED_SU_ROLES.get().unwrap().to_str().unwrap()) == false {
-                        pg_sys::error!("Role {} not in permitted superuser list", role_name)
-                    }
-                }
-                // check if we are setting superuser true
-                if option_name == "superuser" && unsafe {pg_sys::defGetBoolean(option.as_ptr())} {
-                    if let Err(e) = is_role_modify_allowed(is_strict_mode_enabled()){
-                        pg_sys::error!("{}",e);
-                    };
-                }
-        }
+    alter_role_stmt = unsafe {PgBox::from_pg(stmt as *mut pg_sys::AlterRoleStmt)};
+    // check we aren't altering a reserved role (existing superuser)
+    let role_oid = unsafe {pg_sys::get_rolespec_oid(alter_role_stmt.role, true)};
+    if is_restricted_role_or_grant(role_oid){
+        if let Err(e) = is_role_modify_allowed(is_strict_mode_enabled()){
+            pg_sys::error!("{}",e);
+        };
     }
-}
 
-fn grant_role_checks(stmt: *mut pg_sys::Node) {
-    let grant_role_stmt: PgBox<pg_sys::GrantRoleStmt>;
-    let mut access_privilege: PgBox<pg_sys::AccessPriv>;
-
-    
-        grant_role_stmt = unsafe {PgBox::from_pg(stmt as *mut pg_sys::GrantRoleStmt)};
-        let lst = unsafe {pgrx::PgList::from_pg(grant_role_stmt.granted_roles)};
-        for granted_role in lst.iter_ptr() {
-            access_privilege = unsafe {PgBox::from_pg(granted_role as *mut pg_sys::AccessPriv)};
-            //let priv_name = std::ffi::CStr::from_ptr(access_privilege.priv_name).to_string_lossy().into_owned();
-            let roloid : pg_sys::Oid = unsafe {pg_sys::get_role_oid(access_privilege.priv_name, false)};
-            if is_restricted_role_or_grant(roloid) {
+    let options_lst = unsafe {pgrx::PgList::from_pg(alter_role_stmt.options)};
+    for opt_raw in options_lst.iter_ptr() {
+        option = unsafe {PgBox::from_pg(opt_raw as *mut pg_sys::DefElem)};
+        if let Ok(option_name) = util::to_cstr(option.defname){
+            // check if role is allowed to be a superuser, is in GUC_RESERVED_SU_ROLES
+            if let Ok(role_name) = util::to_cstr(unsafe {(*alter_role_stmt.role).rolename}){
+                if is_allowed_superuser_role(role_name, GUC_RESERVED_SU_ROLES.get().unwrap().to_str().unwrap()) == false {
+                    pg_sys::error!("Role {} not in permitted superuser list", role_name)
+                }
+            }
+            // check if we are setting superuser true
+            if option_name == "superuser" && unsafe {pg_sys::defGetBoolean(option.as_ptr())} {
                 if let Err(e) = is_role_modify_allowed(is_strict_mode_enabled()){
                     pg_sys::error!("{}",e);
                 };
             }
         }
-    
+    }
+}
+
+fn grant_role_checks(stmt: *mut pg_sys::Node) {
+    let grant_role_stmt: PgBox<pg_sys::GrantRoleStmt> = unsafe {PgBox::from_pg(stmt as *mut pg_sys::GrantRoleStmt)};
+    let lst = unsafe {pgrx::PgList::from_pg(grant_role_stmt.granted_roles)};
+    for granted_role in lst.iter_ptr() {
+        let mut access_privilege: PgBox<pg_sys::AccessPriv> = unsafe {PgBox::from_pg(granted_role as *mut pg_sys::AccessPriv)};
+        //let priv_name = std::ffi::CStr::from_ptr(access_privilege.priv_name).to_string_lossy().into_owned();
+        let roloid : pg_sys::Oid = unsafe {pg_sys::get_role_oid(access_privilege.priv_name, false)};
+        if is_restricted_role_or_grant(roloid) {
+            if let Err(e) = is_role_modify_allowed(is_strict_mode_enabled()){
+                pg_sys::error!("{}",e);
+            };
+        }
+    }
 }
 
 fn function_create_checks(stmt: *mut pg_sys::Node) {
@@ -203,10 +199,10 @@ fn function_create_checks(stmt: *mut pg_sys::Node) {
 
     for opt_raw in options_lst.iter_ptr() {
         option = unsafe {PgBox::from_pg(opt_raw as *mut pg_sys::DefElem)};
-        if let Ok(option_name) = unsafe {std::ffi::CStr::from_ptr(option.defname).to_str()} {
+        if let Ok(option_name) = util::to_cstr(option.defname) {
             // creating a function with specific language
             if option_name == "language" {
-                if let Ok(lang_name) = unsafe {std::ffi::CStr::from_ptr(pg_sys::defGetString(option.as_ptr())).to_str()} {
+                if let Ok(lang_name) = util::to_cstr(unsafe {pg_sys::defGetString(option.as_ptr())}) {
                     check_body = match lang_name {
                         "plperlu"|"plpythonu"=>{
                             if let Err(e) = is_function_language_allowed(is_strict_mode_enabled()){
@@ -227,13 +223,14 @@ fn function_create_checks(stmt: *mut pg_sys::Node) {
         }
     }
     if check_body { // check if a reserved function
-        let sql_body: &str = unsafe {std::ffi::CStr::from_ptr(sql_body_ptr).to_str().unwrap()};
-        if is_reserved_internal_function(sql_body){
-            pg_sys::error!("using builtin function {} is not allowed", sql_body);
-        }
-        // in the case of C functions, we wan't to check the path it is being created from
-        if is_reserved_so(sql_body) {
-            pg_sys::error!("using c function from {} is not allowed", sql_body);
+        if let Ok(sql_body) = util::to_cstr(sql_body_ptr) {
+            if is_reserved_internal_function(sql_body){
+                pg_sys::error!("using builtin function {} is not allowed", sql_body);
+            }
+            // in the case of C functions, we wan't to check the path it is being created from
+            if is_reserved_so(sql_body) {
+                pg_sys::error!("using c function from {} is not allowed", sql_body);
+            }
         }
     }
 }
@@ -364,37 +361,37 @@ fn get_cached_builtin_oids() -> (u32, u32, &'static mut Vec<pg_sys::Oid>) {
 #[pg_guard]
 pub extern "C" fn _PG_init() {
     
-        // must be loaded as a shared_library
-        if unsafe { !pg_sys::process_shared_preload_libraries_in_progress }{
-            error!("aiven_pg_gatekeeper is not in shared_preload_libraries");
-        }
-    
-        GucRegistry::define_bool_guc(
-            "aiven.pg_security_agent",
-            "Toggle the security agent checks on and off",
-            "Toggle the security agent checks on and off",
-            &GUC_AGENT_IS_ENABLED,
-            GucContext::Sighup,
-            GucFlags::SUPERUSER_ONLY|GucFlags::DISALLOW_IN_AUTO_FILE|GucFlags::NOT_WHILE_SEC_REST,
-        );
+    // must be loaded as a shared_library
+    if unsafe { !pg_sys::process_shared_preload_libraries_in_progress }{
+        error!("aiven_pg_gatekeeper is not in shared_preload_libraries");
+    }
 
-        GucRegistry::define_bool_guc(
-            "aiven.pg_security_agent_strict",
-            "Toggle the agent into strict mode. Reserved actions are blocked regardless of context",
-            "Toggle the agent into strict mode. Reserved actions are blocked regardless of context",
-            &GUC_IS_STRICT,
-            GucContext::Postmaster,
-            GucFlags::SUPERUSER_ONLY|GucFlags::DISALLOW_IN_AUTO_FILE|GucFlags::NOT_WHILE_SEC_REST,
-        );
+    GucRegistry::define_bool_guc(
+        "aiven.pg_security_agent",
+        "Toggle the security agent checks on and off",
+        "Toggle the security agent checks on and off",
+        &GUC_AGENT_IS_ENABLED,
+        GucContext::Sighup,
+        GucFlags::SUPERUSER_ONLY|GucFlags::DISALLOW_IN_AUTO_FILE|GucFlags::NOT_WHILE_SEC_REST,
+    );
 
-        GucRegistry::define_string_guc(
-            "aiven.pg_security_agent_reserved_roles",
-            "Comma-separated list of roles that can be assigned superuser",
-            "Comma-separated list of roles that can be assigned superuser",
-            &GUC_RESERVED_SU_ROLES,
-            GucContext::Postmaster,
-            GucFlags::SUPERUSER_ONLY|GucFlags::DISALLOW_IN_AUTO_FILE|GucFlags::NOT_WHILE_SEC_REST|GucFlags::NO_SHOW_ALL,
-        );
+    GucRegistry::define_bool_guc(
+        "aiven.pg_security_agent_strict",
+        "Toggle the agent into strict mode. Reserved actions are blocked regardless of context",
+        "Toggle the agent into strict mode. Reserved actions are blocked regardless of context",
+        &GUC_IS_STRICT,
+        GucContext::Postmaster,
+        GucFlags::SUPERUSER_ONLY|GucFlags::DISALLOW_IN_AUTO_FILE|GucFlags::NOT_WHILE_SEC_REST,
+    );
+
+    GucRegistry::define_string_guc(
+        "aiven.pg_security_agent_reserved_roles",
+        "Comma-separated list of roles that can be assigned superuser",
+        "Comma-separated list of roles that can be assigned superuser",
+        &GUC_RESERVED_SU_ROLES,
+        GucContext::Postmaster,
+        GucFlags::SUPERUSER_ONLY|GucFlags::DISALLOW_IN_AUTO_FILE|GucFlags::NOT_WHILE_SEC_REST|GucFlags::NO_SHOW_ALL,
+    );
 
     unsafe {
         PREV_EXECUTOR_START_HOOK = pg_sys::ExecutorStart_hook;
