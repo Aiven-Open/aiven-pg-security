@@ -168,7 +168,7 @@ fn grant_role_checks(stmt: *mut pg_sys::Node) {
     let grant_role_stmt: PgBox<pg_sys::GrantRoleStmt> = unsafe {PgBox::from_pg(stmt as *mut pg_sys::GrantRoleStmt)};
     let lst: pgrx::PgList<pg_sys::AccessPriv> = unsafe {pgrx::PgList::from_pg(grant_role_stmt.granted_roles)};
     for granted_role in lst.iter_ptr() {
-        let mut access_privilege: PgBox<pg_sys::AccessPriv> = unsafe {PgBox::from_pg(granted_role as *mut pg_sys::AccessPriv)};
+        let access_privilege: PgBox<pg_sys::AccessPriv> = unsafe {PgBox::from_pg(granted_role as *mut pg_sys::AccessPriv)};
         //let priv_name = std::ffi::CStr::from_ptr(access_privilege.priv_name).to_string_lossy().into_owned();
         let roloid : pg_sys::Oid = unsafe {pg_sys::get_role_oid(access_privilege.priv_name, false)};
         if is_restricted_role_or_grant(roloid) {
