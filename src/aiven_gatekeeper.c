@@ -36,6 +36,13 @@
 
 PG_MODULE_MAGIC;
 
+/* session_auth_is_superuser was renamed to current_role_is_superuser */
+#if PG17_GTE
+#define CURRENT_ROLE_IS_SUPERUSER current_role_is_superuser
+#else
+#define CURRENT_ROLE_IS_SUPERUSER session_auth_is_superuser
+#endif
+
 void _PG_init(void);
 void _PG_fini(void);
 
@@ -139,9 +146,8 @@ is_elevated(void)
     }
 
     is_superuser = superuser_arg(currentUserId);
-
     /* elevated to supersuser when the session auth user does not have superuser privileges */
-    return is_superuser && !session_auth_is_superuser;
+    return is_superuser && !CURRENT_ROLE_IS_SUPERUSER;
 }
 
 static bool
