@@ -269,7 +269,7 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
     char *funcLang;
     int i;
     bool checkBody;
-    char *sqlBody;
+    char *sqlBody = "";
     char *result;
 
     /* if the agent is disabled, skip all checks */
