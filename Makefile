@@ -1,5 +1,3 @@
-EXTENSION = aiven_gatekeeper
-
 MODULE_big = aiven_gatekeeper
 OBJS = src/aiven_gatekeeper.o
 

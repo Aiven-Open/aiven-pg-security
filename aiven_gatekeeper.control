@@ -1,4 +1,0 @@
-comment = 'Aiven standard security library'
-default_version = '1.0.0'
-module_pathname = '$libdir/aiven_gatekeeper'
-relocatable = false
