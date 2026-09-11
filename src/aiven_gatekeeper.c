@@ -105,6 +105,11 @@ static bool BUG_01 = true;
 static bool
 allowed_guc_change_check_hook(bool *newval, void **extra, GucSource source)
 {
+    // Allow the change during early startup
+    if (!IsUnderPostmaster) {
+        return true;
+    }
+
     /* don't allow setting the config value from an elevated context
      * otherwise a combination of ALTER SYSTEM SET aiven.pg_security_agent TO off;
      * SELECT pg_reload_conf(); could be used in a two step attack to disable
@@ -119,6 +124,11 @@ allowed_guc_change_check_hook(bool *newval, void **extra, GucSource source)
 static bool
 allowed_guc_change_allowed_superusers(char **newval, void **extra, GucSource source)
 {
+    // Allow the change during early startup
+    if (!IsUnderPostmaster) {
+        return true;
+    }
+
     /* same as with the boolean version */
     return !(pg_security_agent_strict || creating_extension || is_security_restricted() || is_elevated());
 }
