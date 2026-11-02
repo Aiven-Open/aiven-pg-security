@@ -25,7 +25,7 @@
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
-#include "utils/fmgrtab.h"
+#include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/resowner.h"
 #include "utils/varlena.h"
@@ -58,26 +58,67 @@ static char *allow_role_stmt(void);
 static void allow_granted_roles(List *addroleto);
 static char *allow_grant_or_alter_role(Oid role_oid);
 static bool allowed_guc_change_check_hook(bool *newval, void **extra, GucSource source);
+static bool is_reserved_func_oid(Oid foid);
 
-/* disallow-list of reserved functions we don't want to give access to
+/* disallow-list of reserved builtin functions we don't want to give access to
  * as these can be abused in to get local filesystem access or as a step
  * in gaining code execution.
+ *
+ * builtin function oids are fixed in pg_proc.dat and never change for an
+ * existing function, even when its C symbol is renamed (as happened to the
+ * pg_read_file family in PG16), so the list is kept as oids via the macros
+ * from utils/fmgroids.h. Variants that only exist on some major versions are
+ * guarded with #ifdef.
+ *
+ * Before PG14 the fmgroids.h macros were named after the C symbol (prosrc),
+ * from PG14 on they are named after the SQL name and argument types. The oids
+ * are the same in both branches.
  */
-static const char *reserved_func_names[] = {"pg_read_file",
-                                            "pg_read_file_off_len",
-                                            "pg_read_file_v2",
-                                            "pg_read_file_all",
-                                            "pg_read_binary_file",
-                                            "pg_read_binary_file_all",
-                                            "pg_read_binary_file_off_len",
-                                            "pg_reload_conf",
-                                            "be_lo_import",
-                                            "be_lo_export",
-                                            "be_lo_import_with_oid"};
-static const int NUM_RESERVED_FUNCS = sizeof reserved_func_names / sizeof reserved_func_names[0];
-static Oid *reserved_func_oids; // array to track the oids of the above reserved_func_names
-static int max_reserved_oid = 0;
-static int min_reserved_oid = 9000;
+static const Oid reserved_func_oids[] = {
+#if PG14_GTE
+    /* pg_read_file */
+    F_PG_READ_FILE_TEXT,                       /* 3826 */
+    F_PG_READ_FILE_TEXT_INT8_INT8,             /* 2624 */
+    F_PG_READ_FILE_TEXT_INT8_INT8_BOOL,        /* 3293 */
+#ifdef F_PG_READ_FILE_TEXT_BOOL                /* PG16+ */
+    F_PG_READ_FILE_TEXT_BOOL,                  /* 6208 */
+#endif
+#ifdef F_PG_READ_FILE_OLD                      /* removed in PG17 */
+    F_PG_READ_FILE_OLD,                        /* 4100 */
+#endif
+    /* pg_read_binary_file */
+    F_PG_READ_BINARY_FILE_TEXT,                /* 3828 */
+    F_PG_READ_BINARY_FILE_TEXT_INT8_INT8,      /* 3827 */
+    F_PG_READ_BINARY_FILE_TEXT_INT8_INT8_BOOL, /* 3295 */
+#ifdef F_PG_READ_BINARY_FILE_TEXT_BOOL         /* PG16+ */
+    F_PG_READ_BINARY_FILE_TEXT_BOOL,           /* 6209 */
+#endif
+    F_PG_RELOAD_CONF,                          /* 2621 */
+    /* lo_import / lo_export */
+    F_LO_IMPORT_TEXT,                          /* 764 */
+    F_LO_IMPORT_TEXT_OID,                      /* 767 */
+    F_LO_EXPORT,                               /* 765 */
+#else
+    /* pg_read_file */
+    F_PG_READ_FILE_ALL,                        /* 3826 */
+    F_PG_READ_FILE_OFF_LEN,                    /* 2624 */
+    F_PG_READ_FILE_V2,                         /* 3293 */
+    F_PG_READ_FILE,                            /* 4100, pg_read_file_old */
+    /* pg_read_binary_file */
+    F_PG_READ_BINARY_FILE_ALL,                 /* 3828 */
+    F_PG_READ_BINARY_FILE_OFF_LEN,             /* 3827 */
+    F_PG_READ_BINARY_FILE,                     /* 3295 */
+    F_PG_RELOAD_CONF,                          /* 2621 */
+    /* lo_import / lo_export */
+    F_BE_LO_IMPORT,                            /* 764 */
+    F_BE_LO_IMPORT_WITH_OID,                   /* 767 */
+    F_BE_LO_EXPORT,                            /* 765 */
+#endif
+};
+static const int NUM_RESERVED_FUNCS = lengthof(reserved_func_oids);
+/* range of reserved_func_oids, computed in _PG_init, allows skipping the search for most function calls */
+static Oid max_reserved_oid = InvalidOid;
+static Oid min_reserved_oid = InvalidOid;
 
 /* reserverd columns in the pg_proc table that aren't permitted to be modified */
 static const char *reserved_col_names[] = {"proowner", "proacl", "prolang", "prosecdef"};
@@ -277,7 +318,6 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
     AccessPriv *priv;
     Oid roleoid;
     char *funcLang;
-    int i;
     bool checkBody;
     char *sqlBody = "";
     char *result;
@@ -472,18 +512,14 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
                 sqlBody = defGetString(defel);
             }
         }
-        /* we need to check the sql body, as we are in restricted context and the function is of type internal*/
-        if (checkBody == true)
+        /* we need to check the sql body, as we are in restricted context and the function is of type internal.
+         * the body is the C symbol name of a builtin, resolve it to the builtin oid so that we don't have to
+         * track the symbol names, which change between major versions
+         */
+        if (checkBody == true && sqlBody != NULL && is_reserved_func_oid(fmgr_internal_function(sqlBody)))
         {
-            for (i = 0; i < NUM_RESERVED_FUNCS; i++)
-            {
-                /* internal names are case sensitive, so strcmp is fine here */
-                if (strncmp(reserved_func_names[i], sqlBody, 28) == 0)
-                {
-                    elog(ERROR, "using builtin function %s is not allowed", sqlBody);
-                    return;
-                }
-            }
+            elog(ERROR, "using builtin function %s is not allowed", sqlBody);
+            return;
         }
         break;
     case T_CreateExtensionStmt:
@@ -506,59 +542,41 @@ gatekeeper_checks(PROCESS_UTILITY_PARAMS)
         standard_ProcessUtility(PROCESS_UTILITY_ARGS);
 }
 
-/* straight copy from fmgr.c
- * this function isn't exported by fmgr.c, so just
- * recreate it here
- */
-static const FmgrBuiltin *
-fmgr_lookupByName(const char *name)
-{
-    int i;
-
-    for (i = 0; i < fmgr_nbuiltins; i++)
-    {
-        // switched to strncmp, 28 is the current max size that can be expected for name, as from reserved_func_names
-        if (strncmp(name, fmgr_builtins[i].funcName, 28) == 0)
-            return fmgr_builtins + i;
-    }
-    return NULL;
-}
-
+/* returns true if foid is one of the reserved builtin functions */
 static bool
-set_reserved_oids()
+is_reserved_func_oid(Oid foid)
 {
-    /* sets the min and max_reserved_oid variables, allowing for skipping builtins search
-     * if an oid is clearly not going to be in the builtins.
-     */
-    const FmgrBuiltin *builtin;
     int i;
 
-    reserved_func_oids = (Oid *)malloc(NUM_RESERVED_FUNCS * sizeof(Oid));
-    if (reserved_func_oids == NULL)
-    {
-        return false;
-    }
-    /* loop through the function names we have defined as reserved
-     * lookup the oid of the function so that we can use this for future
-     * evaluations rather than comparing strings
-     * and find the maximum oid
+    /* check if the oid is within range of our reserved oids
+     * this allows faster evaluation, rather than having to loop through
+     * the array for each function call.
      */
+    if (foid < min_reserved_oid || foid > max_reserved_oid)
+        return false;
+
     for (i = 0; i < NUM_RESERVED_FUNCS; i++)
     {
-        if ((builtin = fmgr_lookupByName(reserved_func_names[i])) != NULL)
-        {
-            reserved_func_oids[i] = builtin->foid;
-            if (builtin->foid < min_reserved_oid)
-            {
-                min_reserved_oid = builtin->foid;
-            }
-            else if (builtin->foid > max_reserved_oid)
-            {
-                max_reserved_oid = builtin->foid;
-            }
-        }
+        if (reserved_func_oids[i] == foid)
+            return true;
     }
-    return true;
+    return false;
+}
+
+static void
+set_reserved_oid_range(void)
+{
+    /* sets the min and max_reserved_oid variables from the static oid list */
+    int i;
+
+    min_reserved_oid = max_reserved_oid = reserved_func_oids[0];
+    for (i = 1; i < NUM_RESERVED_FUNCS; i++)
+    {
+        if (reserved_func_oids[i] < min_reserved_oid)
+            min_reserved_oid = reserved_func_oids[i];
+        if (reserved_func_oids[i] > max_reserved_oid)
+            max_reserved_oid = reserved_func_oids[i];
+    }
 }
 
 /* hook to check if the function being called is not in the disallowed-list
@@ -572,53 +590,30 @@ gatekeeper_oa_hook(ObjectAccessType access,
                    int subId,
                    void *arg)
 {
-    const FmgrBuiltin *builtin;
-    int i;
-
     /* only check function if security agent is enabled */
     if (pg_security_agent_enabled)
     {
         switch (access) // we are only interested in the OAT_FUNCTION_EXECUTE ObjectAccessType
         {
         case OAT_FUNCTION_EXECUTE:
-            /* check if the objecid is within range of our reserved oids
-             * this allows faster evalation, rather than having to loop through
-             * arrays for each function call.
-             */
-            if (objectId >= min_reserved_oid && objectId <= max_reserved_oid)
+            if (is_reserved_func_oid(objectId))
             {
-                for (i = 0; i < NUM_RESERVED_FUNCS; i++)
+                /* check if we are in a privileged context and disallow the function executions */
+                if (pg_security_agent_strict || creating_extension || is_elevated() || is_security_restricted())
                 {
-                    /* lookup the oid to see if it is in our reserved list
-                     */
-                    if (reserved_func_oids[i] == objectId)
-                    {
-                        /* check if we are in a privileged context and disallow the function executions */
-                        if (pg_security_agent_strict || creating_extension || is_elevated() || is_security_restricted())
-                        {
-                            /* get the function information so that error message can be more friendly */
-                            if ((builtin = fmgr_lookupByName(reserved_func_names[i])) != NULL)
-                            {
-                                elog(ERROR, "using builtin function %s is not allowed", builtin->funcName);
-                                return;
-                            }
-                        }
-                        /* extra check, this is to enforce only superuser can call this function in normal
-                         * context. Otherwise PG uses the grant system, which could lead to roles being
-                         * granted execute privilege on the funcion and still being able to call it.
-                         * This is not too serious, since non-superusers can't read outside reserved paths (for example)
-                         * but rather be strict.
-                         */
-                        if (!superuser())
-                        {
-                            if ((builtin = fmgr_lookupByName(reserved_func_names[i])) != NULL)
-                            {
-                                elog(ERROR, "using builtin function %s is not allowed by non-superusers", builtin->funcName);
-                                return;
-                            }
-                        }
-                        break;
-                    }
+                    elog(ERROR, "using builtin function %s is not allowed", get_func_name(objectId));
+                    return;
+                }
+                /* extra check, this is to enforce only superuser can call this function in normal
+                 * context. Otherwise PG uses the grant system, which could lead to roles being
+                 * granted execute privilege on the funcion and still being able to call it.
+                 * This is not too serious, since non-superusers can't read outside reserved paths (for example)
+                 * but rather be strict.
+                 */
+                if (!superuser())
+                {
+                    elog(ERROR, "using builtin function %s is not allowed by non-superusers", get_func_name(objectId));
+                    return;
                 }
             }
             break;
@@ -819,22 +814,17 @@ void _PG_init(void)
                              NULL);
 
 
-    if (set_reserved_oids())
-    {
-        /* Install Hooks */
-        prev_ProcessUtility = ProcessUtility_hook;
-        ProcessUtility_hook = gatekeeper_checks;
+    set_reserved_oid_range();
 
-        next_object_access_hook = object_access_hook;
-        object_access_hook = gatekeeper_oa_hook;
+    /* Install Hooks */
+    prev_ProcessUtility = ProcessUtility_hook;
+    ProcessUtility_hook = gatekeeper_checks;
 
-        prev_ExecutorStart_hook = ExecutorStart_hook;
-        ExecutorStart_hook = pg_proc_guard_checks;
-    }
-    else
-    {
-        elog(ERROR, "Failed to initialise aiven gatekeeper.");
-    }
+    next_object_access_hook = object_access_hook;
+    object_access_hook = gatekeeper_oa_hook;
+
+    prev_ExecutorStart_hook = ExecutorStart_hook;
+    ExecutorStart_hook = pg_proc_guard_checks;
 }
 
 /*
@@ -842,10 +832,6 @@ void _PG_init(void)
  */
 void _PG_fini(void)
 {
-    /* free malloc(s) */
-    if (reserved_func_oids != NULL)
-        free(reserved_func_oids);
-
     /* Uninstall hooks. */
     ProcessUtility_hook = prev_ProcessUtility;
     object_access_hook = next_object_access_hook;
